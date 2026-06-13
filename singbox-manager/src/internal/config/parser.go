@@ -1,0 +1,867 @@
+package config
+
+import (
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+type section struct {
+	typ     string
+	name    string
+	line    int
+	options map[string]string
+	lists   map[string][]string
+}
+
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	sections, err := parseUCI(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := DefaultConfig()
+	if err := applySections(&cfg, sections); err != nil {
+		return nil, err
+	}
+	if err := Validate(cfg); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func parseUCI(data string) ([]section, error) {
+	var sections []section
+	var current *section
+
+	for i, raw := range strings.Split(data, "\n") {
+		lineNo := i + 1
+		tokens, err := tokenizeUCI(raw)
+		if err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+		}
+		if len(tokens) == 0 {
+			continue
+		}
+
+		switch tokens[0] {
+		case "config":
+			if len(tokens) != 2 && len(tokens) != 3 {
+				return nil, fmt.Errorf("line %d: config expects type and optional name", lineNo)
+			}
+			name := ""
+			if len(tokens) == 3 {
+				name = tokens[2]
+			}
+			sections = append(sections, section{
+				typ:     tokens[1],
+				name:    name,
+				line:    lineNo,
+				options: map[string]string{},
+				lists:   map[string][]string{},
+			})
+			current = &sections[len(sections)-1]
+		case "option":
+			if current == nil {
+				return nil, fmt.Errorf("line %d: option without config section", lineNo)
+			}
+			if len(tokens) != 3 {
+				return nil, fmt.Errorf("line %d: option expects key and value", lineNo)
+			}
+			if _, exists := current.options[tokens[1]]; exists {
+				return nil, fmt.Errorf("line %d: duplicate option %q in %s %q", lineNo, tokens[1], current.typ, current.name)
+			}
+			current.options[tokens[1]] = tokens[2]
+		case "list":
+			if current == nil {
+				return nil, fmt.Errorf("line %d: list without config section", lineNo)
+			}
+			if len(tokens) != 3 {
+				return nil, fmt.Errorf("line %d: list expects key and value", lineNo)
+			}
+			current.lists[tokens[1]] = append(current.lists[tokens[1]], tokens[2])
+		default:
+			return nil, fmt.Errorf("line %d: unsupported UCI directive %q", lineNo, tokens[0])
+		}
+	}
+
+	return sections, nil
+}
+
+func tokenizeUCI(raw string) ([]string, error) {
+	var tokens []string
+	var current strings.Builder
+	var quote rune
+	escaped := false
+	inToken := false
+
+	for _, ch := range raw {
+		if escaped {
+			current.WriteRune(ch)
+			inToken = true
+			escaped = false
+			continue
+		}
+
+		if quote != 0 {
+			if quote == '"' && ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+				continue
+			}
+			current.WriteRune(ch)
+			inToken = true
+			continue
+		}
+
+		switch {
+		case ch == '#':
+			if inToken {
+				current.WriteRune(ch)
+			}
+			goto finish
+		case ch == '\'' || ch == '"':
+			quote = ch
+			inToken = true
+		case ch == ' ' || ch == '\t' || ch == '\r':
+			if inToken {
+				tokens = append(tokens, current.String())
+				current.Reset()
+				inToken = false
+			}
+		default:
+			current.WriteRune(ch)
+			inToken = true
+		}
+	}
+
+finish:
+	if escaped {
+		return nil, fmt.Errorf("dangling escape")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated quoted string")
+	}
+	if inToken {
+		tokens = append(tokens, current.String())
+	}
+	return tokens, nil
+}
+
+func applySections(cfg *Config, sections []section) error {
+	seenManager := false
+
+	for _, sec := range sections {
+		switch sec.typ {
+		case "manager":
+			if sec.name != "main" {
+				return fmt.Errorf("line %d: unsupported manager section %q", sec.line, sec.name)
+			}
+			if seenManager {
+				return fmt.Errorf("line %d: duplicate manager main section", sec.line)
+			}
+			seenManager = true
+			if err := applyManager(cfg, sec); err != nil {
+				return err
+			}
+		case "group":
+			if sec.name == "" {
+				return fmt.Errorf("line %d: group section requires a name", sec.line)
+			}
+			if _, exists := cfg.Groups[sec.name]; exists {
+				return fmt.Errorf("line %d: duplicate group %q", sec.line, sec.name)
+			}
+			group, err := readGroup(sec)
+			if err != nil {
+				return err
+			}
+			cfg.Groups[group.ID] = group
+		case "subscription":
+			subscription, err := readSubscription(sec)
+			if err != nil {
+				return err
+			}
+			cfg.Subscriptions[subscription.ID] = subscription
+		case "node":
+			node, err := readNode(sec)
+			if err != nil {
+				return err
+			}
+			cfg.Nodes[node.ID] = node
+		case "routing_profile":
+			profile, err := readRoutingProfile(sec)
+			if err != nil {
+				return err
+			}
+			cfg.Routing[profile.ID] = profile
+		case "dns_profile":
+			profile, err := readDNSProfile(sec)
+			if err != nil {
+				return err
+			}
+			cfg.DNSProfiles[profile.ID] = profile
+		case "dns_server":
+			server, err := readDNSServer(sec)
+			if err != nil {
+				return err
+			}
+			cfg.DNSServers[server.ID] = server
+		case "ruleset":
+			ruleset, err := readRuleSet(sec)
+			if err != nil {
+				return err
+			}
+			cfg.RuleSets[ruleset.ID] = ruleset
+		case "source_rule":
+			rule, err := readSourceRule(sec)
+			if err != nil {
+				return err
+			}
+			cfg.SourceRules[rule.ID] = rule
+		case "pac":
+			if sec.name != "main" && sec.name != "pac" {
+				return fmt.Errorf("line %d: unsupported pac section %q", sec.line, sec.name)
+			}
+			pac, err := readPAC(sec)
+			if err != nil {
+				return err
+			}
+			cfg.PAC = pac
+		case "pac_custom":
+			pac, err := readCustomPAC(sec)
+			if err != nil {
+				return err
+			}
+			cfg.CustomPACs[pac.ID] = pac
+		case "tproxy":
+			if sec.name != "main" && sec.name != "tproxy" {
+				return fmt.Errorf("line %d: unsupported tproxy section %q", sec.line, sec.name)
+			}
+			tproxy, err := readTProxy(sec)
+			if err != nil {
+				return err
+			}
+			cfg.TProxy = tproxy
+		case "tun":
+			if sec.name != "main" && sec.name != "tun" {
+				return fmt.Errorf("line %d: unsupported tun section %q", sec.line, sec.name)
+			}
+			tun, err := readTUN(sec)
+			if err != nil {
+				return err
+			}
+			cfg.TUN = tun
+		default:
+			return fmt.Errorf("line %d: unsupported section type %q", sec.line, sec.typ)
+		}
+	}
+
+	return nil
+}
+
+func applyManager(cfg *Config, sec section) error {
+	allowed := map[string]bool{
+		"enabled": true, "log_level": true, "active_group": true, "runtime_mode": true,
+		"sing_box_bin": true, "socket_path": true, "api_listen": true, "pac_listen": true,
+		"mixed_listen": true, "mixed_port": true, "tproxy_port": true, "dns_port": true,
+		"update_interval": true,
+	}
+	if err := rejectUnknownOptions(sec, allowed); err != nil {
+		return err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return err
+	}
+
+	var err error
+	for key, value := range sec.options {
+		switch key {
+		case "enabled":
+			cfg.Manager.Enabled, err = parseBool(sec, key, value)
+		case "log_level":
+			cfg.Manager.LogLevel = value
+		case "active_group":
+			cfg.Manager.ActiveGroup = value
+		case "runtime_mode":
+			cfg.Manager.RuntimeMode = value
+		case "sing_box_bin":
+			cfg.Manager.SingBoxBinary = value
+		case "socket_path":
+			cfg.Manager.SocketPath = value
+		case "api_listen":
+			cfg.Manager.APIListen = value
+		case "pac_listen":
+			cfg.Manager.PACListen = value
+		case "mixed_listen":
+			cfg.Manager.MixedListen = value
+		case "mixed_port":
+			cfg.Manager.MixedPort, err = parsePort(sec, key, value)
+		case "tproxy_port":
+			cfg.Manager.TProxyPort, err = parsePort(sec, key, value)
+		case "dns_port":
+			cfg.Manager.DNSPort, err = parsePort(sec, key, value)
+		case "update_interval":
+			cfg.Manager.UpdateInterval = value
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readGroup(sec section) (Group, error) {
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "routing_profile": true, "dns_profile": true,
+		"strategy": true, "selected_node": true,
+		"health": true, "latency_ms": true, "last_check": true,
+	}); err != nil {
+		return Group{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{"subscription": true}); err != nil {
+		return Group{}, err
+	}
+
+	group := Group{
+		ID:             sec.name,
+		Enabled:        true,
+		Name:           sec.name,
+		Subscriptions:  cleanList(sec.lists["subscription"]),
+		RoutingProfile: sec.options["routing_profile"],
+		DNSProfile:     sec.options["dns_profile"],
+		Strategy:       valueOrDefault(sec.options["strategy"], "manual"),
+		SelectedNode:   sec.options["selected_node"],
+		Health:         valueOrDefault(sec.options["health"], "unknown"),
+		LastCheck:      sec.options["last_check"],
+	}
+	if value, ok := sec.options["latency_ms"]; ok {
+		latency, err := parseNonNegativeInt(sec, "latency_ms", value)
+		if err != nil {
+			return Group{}, err
+		}
+		group.LatencyMS = latency
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return Group{}, err
+		}
+		group.Enabled = enabled
+	}
+	if name := sec.options["name"]; name != "" {
+		group.Name = name
+	}
+	return group, nil
+}
+
+func readSubscription(sec section) (Subscription, error) {
+	if sec.name == "" {
+		return Subscription{}, fmt.Errorf("line %d: subscription section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "url": true, "format": true, "update_interval": true,
+		"last_update": true, "last_error": true, "health": true, "latency_ms": true, "last_check": true,
+	}); err != nil {
+		return Subscription{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return Subscription{}, err
+	}
+
+	subscription := Subscription{
+		ID:             sec.name,
+		Enabled:        false,
+		Name:           sec.name,
+		URL:            sec.options["url"],
+		Format:         valueOrDefault(sec.options["format"], "auto"),
+		UpdateInterval: valueOrDefault(sec.options["update_interval"], "24h"),
+		LastUpdate:     sec.options["last_update"],
+		LastError:      sec.options["last_error"],
+		Health:         valueOrDefault(sec.options["health"], "unknown"),
+		LastCheck:      sec.options["last_check"],
+	}
+	if value, ok := sec.options["latency_ms"]; ok {
+		latency, err := parseNonNegativeInt(sec, "latency_ms", value)
+		if err != nil {
+			return Subscription{}, err
+		}
+		subscription.LatencyMS = latency
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return Subscription{}, err
+		}
+		subscription.Enabled = enabled
+	}
+	if name := sec.options["name"]; name != "" {
+		subscription.Name = name
+	}
+	return subscription, nil
+}
+
+func readNode(sec section) (Node, error) {
+	if sec.name == "" {
+		return Node{}, fmt.Errorf("line %d: node section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "type": true, "address": true, "server": true,
+		"port": true, "uuid": true, "password": true, "method": true, "security": true,
+		"tls": true, "flow": true, "transport": true, "host": true, "path": true, "sni": true,
+		"alpn": true, "insecure": true, "congestion": true, "udp_relay_mode": true,
+		"tag": true, "subscription": true, "health": true, "latency_ms": true, "last_check": true,
+	}); err != nil {
+		return Node{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return Node{}, err
+	}
+
+	node := Node{
+		ID:           sec.name,
+		Enabled:      true,
+		Name:         valueOrDefault(sec.options["name"], sec.name),
+		Type:         sec.options["type"],
+		Address:      sec.options["address"],
+		Server:       sec.options["server"],
+		UUID:         sec.options["uuid"],
+		Password:     sec.options["password"],
+		Method:       sec.options["method"],
+		Security:     sec.options["security"],
+		TLS:          false,
+		Flow:         sec.options["flow"],
+		Transport:    sec.options["transport"],
+		Host:         sec.options["host"],
+		Path:         sec.options["path"],
+		SNI:          sec.options["sni"],
+		ALPN:         sec.options["alpn"],
+		Congestion:   sec.options["congestion"],
+		UDPRelayMode: sec.options["udp_relay_mode"],
+		Tag:          valueOrDefault(sec.options["tag"], sec.name),
+		Subscription: sec.options["subscription"],
+		Health:       valueOrDefault(sec.options["health"], "unknown"),
+		LastCheck:    sec.options["last_check"],
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return Node{}, err
+		}
+		node.Enabled = enabled
+	}
+	if value, ok := sec.options["port"]; ok {
+		port, err := parsePort(sec, "port", value)
+		if err != nil {
+			return Node{}, err
+		}
+		node.Port = port
+	}
+	if value, ok := sec.options["tls"]; ok {
+		tls, err := parseBool(sec, "tls", value)
+		if err != nil {
+			return Node{}, err
+		}
+		node.TLS = tls
+	}
+	if value, ok := sec.options["insecure"]; ok {
+		insecure, err := parseBool(sec, "insecure", value)
+		if err != nil {
+			return Node{}, err
+		}
+		node.Insecure = insecure
+	}
+	if value, ok := sec.options["latency_ms"]; ok {
+		latency, err := parseNonNegativeInt(sec, "latency_ms", value)
+		if err != nil {
+			return Node{}, err
+		}
+		node.LatencyMS = latency
+	}
+	return node, nil
+}
+
+func readRoutingProfile(sec section) (RoutingProfile, error) {
+	if sec.name == "" {
+		return RoutingProfile{}, fmt.Errorf("line %d: routing_profile section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "mode": true, "final": true,
+	}); err != nil {
+		return RoutingProfile{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{"ruleset": true}); err != nil {
+		return RoutingProfile{}, err
+	}
+
+	profile := RoutingProfile{
+		ID:       sec.name,
+		Enabled:  true,
+		Name:     valueOrDefault(sec.options["name"], sec.name),
+		Mode:     valueOrDefault(sec.options["mode"], "rule"),
+		RuleSets: cleanList(sec.lists["ruleset"]),
+		Final:    valueOrDefault(sec.options["final"], "proxy"),
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return RoutingProfile{}, err
+		}
+		profile.Enabled = enabled
+	}
+	return profile, nil
+}
+
+func readDNSProfile(sec section) (DNSProfile, error) {
+	if sec.name == "" {
+		return DNSProfile{}, fmt.Errorf("line %d: dns_profile section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "mode": true, "hijack": true,
+	}); err != nil {
+		return DNSProfile{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{"server": true}); err != nil {
+		return DNSProfile{}, err
+	}
+
+	profile := DNSProfile{
+		ID:      sec.name,
+		Enabled: true,
+		Name:    valueOrDefault(sec.options["name"], sec.name),
+		Mode:    valueOrDefault(sec.options["mode"], "direct"),
+		Servers: cleanList(sec.lists["server"]),
+		Hijack:  false,
+	}
+	var err error
+	if value, ok := sec.options["enabled"]; ok {
+		profile.Enabled, err = parseBool(sec, "enabled", value)
+		if err != nil {
+			return DNSProfile{}, err
+		}
+	}
+	if value, ok := sec.options["hijack"]; ok {
+		profile.Hijack, err = parseBool(sec, "hijack", value)
+		if err != nil {
+			return DNSProfile{}, err
+		}
+	}
+	return profile, nil
+}
+
+func readDNSServer(sec section) (DNSServer, error) {
+	if sec.name == "" {
+		return DNSServer{}, fmt.Errorf("line %d: dns_server section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "type": true, "address": true, "detour": true,
+	}); err != nil {
+		return DNSServer{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return DNSServer{}, err
+	}
+
+	server := DNSServer{
+		ID:      sec.name,
+		Enabled: true,
+		Name:    valueOrDefault(sec.options["name"], sec.name),
+		Type:    valueOrDefault(sec.options["type"], "udp"),
+		Address: sec.options["address"],
+		Detour:  sec.options["detour"],
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return DNSServer{}, err
+		}
+		server.Enabled = enabled
+	}
+	return server, nil
+}
+
+func readRuleSet(sec section) (RuleSet, error) {
+	if sec.name == "" {
+		return RuleSet{}, fmt.Errorf("line %d: ruleset section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"id": true, "enabled": true, "name": true, "type": true, "format": true, "url": true,
+		"path": true, "update_interval": true,
+		"last_update": true, "last_error": true,
+	}); err != nil {
+		return RuleSet{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return RuleSet{}, err
+	}
+
+	ruleset := RuleSet{
+		ID:             valueOrDefault(sec.options["id"], sec.name),
+		Enabled:        true,
+		Name:           valueOrDefault(sec.options["name"], sec.name),
+		Type:           valueOrDefault(sec.options["type"], "local"),
+		Format:         valueOrDefault(sec.options["format"], "srs"),
+		URL:            sec.options["url"],
+		Path:           sec.options["path"],
+		UpdateInterval: valueOrDefault(sec.options["update_interval"], "168h"),
+		LastUpdate:     sec.options["last_update"],
+		LastError:      sec.options["last_error"],
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return RuleSet{}, err
+		}
+		ruleset.Enabled = enabled
+	}
+	return ruleset, nil
+}
+
+func readSourceRule(sec section) (SourceRule, error) {
+	if sec.name == "" {
+		return SourceRule{}, fmt.Errorf("line %d: source_rule section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "profile": true, "outbound": true,
+	}); err != nil {
+		return SourceRule{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{"source_ip": true}); err != nil {
+		return SourceRule{}, err
+	}
+
+	rule := SourceRule{
+		ID:       sec.name,
+		Enabled:  true,
+		Name:     valueOrDefault(sec.options["name"], sec.name),
+		Profile:  sec.options["profile"],
+		Sources:  cleanList(sec.lists["source_ip"]),
+		Outbound: valueOrDefault(sec.options["outbound"], "proxy"),
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return SourceRule{}, err
+		}
+		rule.Enabled = enabled
+	}
+	return rule, nil
+}
+
+func readPAC(sec section) (PAC, error) {
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "source": true, "selected_custom": true, "local_bypass": true,
+	}); err != nil {
+		return PAC{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{
+		"custom_rule": true, "whitelist": true, "blacklist": true,
+	}); err != nil {
+		return PAC{}, err
+	}
+
+	pac := PAC{
+		Enabled:        false,
+		Source:         valueOrDefault(sec.options["source"], "generated"),
+		SelectedCustom: sec.options["selected_custom"],
+		LocalBypass:    true,
+		CustomRules:    cleanList(sec.lists["custom_rule"]),
+		Whitelist:      cleanList(sec.lists["whitelist"]),
+		Blacklist:      cleanList(sec.lists["blacklist"]),
+	}
+	var err error
+	if value, ok := sec.options["enabled"]; ok {
+		pac.Enabled, err = parseBool(sec, "enabled", value)
+		if err != nil {
+			return PAC{}, err
+		}
+	}
+	if value, ok := sec.options["local_bypass"]; ok {
+		pac.LocalBypass, err = parseBool(sec, "local_bypass", value)
+		if err != nil {
+			return PAC{}, err
+		}
+	}
+	return pac, nil
+}
+
+func readCustomPAC(sec section) (CustomPAC, error) {
+	if sec.name == "" {
+		return CustomPAC{}, fmt.Errorf("line %d: pac_custom section requires a name", sec.line)
+	}
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "content": true, "content_base64": true,
+	}); err != nil {
+		return CustomPAC{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return CustomPAC{}, err
+	}
+
+	pac := CustomPAC{
+		ID:      sec.name,
+		Enabled: true,
+		Name:    valueOrDefault(sec.options["name"], sec.name),
+		Content: sec.options["content"],
+	}
+	if encoded := sec.options["content_base64"]; encoded != "" {
+		decoded, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil {
+			return CustomPAC{}, fmt.Errorf("line %d: option content_base64 is invalid", sec.line)
+		}
+		pac.Content = string(decoded)
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return CustomPAC{}, err
+		}
+		pac.Enabled = enabled
+	}
+	return pac, nil
+}
+
+func readTProxy(sec section) (TProxy, error) {
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "dns_hijack": true,
+	}); err != nil {
+		return TProxy{}, err
+	}
+	if err := rejectUnknownLists(sec, map[string]bool{
+		"lan_ifname": true, "include_subnet": true, "exclude_subnet": true, "include_mac": true,
+	}); err != nil {
+		return TProxy{}, err
+	}
+
+	tproxy := TProxy{
+		LANIfnames:    cleanList(sec.lists["lan_ifname"]),
+		IncludeSubnet: cleanList(sec.lists["include_subnet"]),
+		ExcludeSubnet: cleanList(sec.lists["exclude_subnet"]),
+		IncludeMAC:    cleanList(sec.lists["include_mac"]),
+	}
+	var err error
+	if value, ok := sec.options["enabled"]; ok {
+		tproxy.Enabled, err = parseBool(sec, "enabled", value)
+		if err != nil {
+			return TProxy{}, err
+		}
+	}
+	if value, ok := sec.options["dns_hijack"]; ok {
+		tproxy.DNSHijack, err = parseBool(sec, "dns_hijack", value)
+		if err != nil {
+			return TProxy{}, err
+		}
+	}
+	return tproxy, nil
+}
+
+func readTUN(sec section) (TUN, error) {
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "auto_route": true, "auto_redirect": true,
+		"inet4_address": true, "inet6_address": true,
+	}); err != nil {
+		return TUN{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return TUN{}, err
+	}
+
+	tun := TUN{
+		AutoRoute:    true,
+		AutoRedirect: true,
+		Inet4Address: valueOrDefault(sec.options["inet4_address"], "172.19.0.1/30"),
+		Inet6Address: valueOrDefault(sec.options["inet6_address"], "fdfe:dcba:9876::1/126"),
+	}
+	var err error
+	if value, ok := sec.options["enabled"]; ok {
+		tun.Enabled, err = parseBool(sec, "enabled", value)
+		if err != nil {
+			return TUN{}, err
+		}
+	}
+	if value, ok := sec.options["auto_route"]; ok {
+		tun.AutoRoute, err = parseBool(sec, "auto_route", value)
+		if err != nil {
+			return TUN{}, err
+		}
+	}
+	if value, ok := sec.options["auto_redirect"]; ok {
+		tun.AutoRedirect, err = parseBool(sec, "auto_redirect", value)
+		if err != nil {
+			return TUN{}, err
+		}
+	}
+	return tun, nil
+}
+
+func rejectUnknownOptions(sec section, allowed map[string]bool) error {
+	for key := range sec.options {
+		if allowed == nil || !allowed[key] {
+			return fmt.Errorf("line %d: unsupported option %q in %s %q", sec.line, key, sec.typ, sec.name)
+		}
+	}
+	return nil
+}
+
+func rejectUnknownLists(sec section, allowed map[string]bool) error {
+	for key := range sec.lists {
+		if allowed == nil || !allowed[key] {
+			return fmt.Errorf("line %d: unsupported list %q in %s %q", sec.line, key, sec.typ, sec.name)
+		}
+	}
+	return nil
+}
+
+func parseBool(sec section, key string, value string) (bool, error) {
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on", "enabled":
+		return true, nil
+	case "0", "false", "no", "off", "disabled":
+		return false, nil
+	default:
+		return false, fmt.Errorf("line %d: option %s must be boolean, got %q", sec.line, key, value)
+	}
+}
+
+func parsePort(sec section, key string, value string) (int, error) {
+	port, err := strconv.Atoi(value)
+	if err != nil || port < 1 || port > 65535 {
+		return 0, fmt.Errorf("line %d: option %s must be a TCP/UDP port, got %q", sec.line, key, value)
+	}
+	return port, nil
+}
+
+func parseNonNegativeInt(sec section, key string, value string) (int, error) {
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0, fmt.Errorf("line %d: option %s must be a non-negative integer, got %q", sec.line, key, value)
+	}
+	return parsed, nil
+}
+
+func cleanList(values []string) []string {
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			cleaned = append(cleaned, value)
+		}
+	}
+	return cleaned
+}
+
+func valueOrDefault(value string, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}

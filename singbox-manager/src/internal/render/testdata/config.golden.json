@@ -1,0 +1,75 @@
+{
+  "log": {
+    "level": "debug",
+    "timestamp": true
+  },
+  "dns": {
+    "servers": [
+      {
+        "server": "223.5.5.5",
+        "server_port": 53,
+        "tag": "local_udp",
+        "type": "udp"
+      }
+    ],
+    "final": "local_udp"
+  },
+  "inbounds": [
+    {
+      "listen": "0.0.0.0",
+      "listen_port": 2080,
+      "sniff": true,
+      "tag": "mixed-in",
+      "type": "mixed"
+    }
+  ],
+  "outbounds": [
+    {
+      "domain_resolver": "local_udp",
+      "tag": "direct",
+      "type": "direct"
+    },
+    {
+      "tag": "block",
+      "type": "block"
+    },
+    {
+      "method": "2022-blake3-aes-128-gcm",
+      "password": "secret",
+      "server": "edge.example.com",
+      "server_port": 8388,
+      "tag": "node-ss",
+      "type": "shadowsocks"
+    },
+    {
+      "default": "node-ss",
+      "outbounds": [
+        "node-ss",
+        "direct"
+      ],
+      "tag": "proxy",
+      "type": "selector"
+    }
+  ],
+  "route": {
+    "rules": [
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "geoip-ir"
+        ]
+      }
+    ],
+    "rule_set": [
+      {
+        "format": "binary",
+        "path": "/tmp/geoip-ir.srs",
+        "tag": "geoip-ir",
+        "type": "local"
+      }
+    ],
+    "final": "proxy",
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local_udp"
+  }
+}
