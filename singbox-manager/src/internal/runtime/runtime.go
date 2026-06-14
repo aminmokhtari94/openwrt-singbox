@@ -22,6 +22,7 @@ const (
 	ActionStop
 	ActionRestart
 	ActionReload
+	ActionTeardown
 
 	maxTProxyPolicyRuleDeletes = 64
 	runtimeMonitorInterval     = 5 * time.Second
@@ -97,6 +98,8 @@ func Control(cfg managerconfig.Config, action Action, paths Paths, renderer Rend
 		return start(cfg, paths, renderer)
 	case ActionReload:
 		return reload(cfg, paths, renderer)
+	case ActionTeardown:
+		return teardown(cfg, paths)
 	default:
 		return Result{}, fmt.Errorf("unsupported runtime action")
 	}
@@ -195,6 +198,14 @@ func startOnce(cfg managerconfig.Config, paths Paths, renderer Renderer) (Result
 }
 
 func stop(cfg managerconfig.Config, paths Paths) (Result, error) {
+	return stopWithCleanup(cfg, paths, cleanupFirewall)
+}
+
+func teardown(cfg managerconfig.Config, paths Paths) (Result, error) {
+	return stopWithCleanup(cfg, paths, cleanupFirewallFull)
+}
+
+func stopWithCleanup(cfg managerconfig.Config, paths Paths, cleanup func(managerconfig.Config, Paths, *Result) error) (Result, error) {
 	disableSupervisor()
 	result := Result{
 		GeneratedPath: paths.GeneratedConfig,
@@ -204,7 +215,7 @@ func stop(cfg managerconfig.Config, paths Paths) (Result, error) {
 	pid := RunningPID(paths)
 	if pid == 0 {
 		_ = os.Remove(paths.PIDFile)
-		if err := cleanupFirewall(cfg, paths, &result); err != nil {
+		if err := cleanup(cfg, paths, &result); err != nil {
 			return result, err
 		}
 		result.Message = "sing-box is not running"
@@ -218,7 +229,7 @@ func stop(cfg managerconfig.Config, paths Paths) (Result, error) {
 	for time.Now().Before(deadline) {
 		if !pidAlive(pid) {
 			_ = os.Remove(paths.PIDFile)
-			if err := cleanupFirewall(cfg, paths, &result); err != nil {
+			if err := cleanup(cfg, paths, &result); err != nil {
 				return result, err
 			}
 			result.Message = "sing-box stopped"
@@ -231,7 +242,7 @@ func stop(cfg managerconfig.Config, paths Paths) (Result, error) {
 		return result, err
 	}
 	_ = os.Remove(paths.PIDFile)
-	if err := cleanupFirewall(cfg, paths, &result); err != nil {
+	if err := cleanup(cfg, paths, &result); err != nil {
 		return result, err
 	}
 	result.Message = "sing-box stopped"
@@ -287,6 +298,10 @@ func cleanupFirewall(cfg managerconfig.Config, paths Paths, result *Result) erro
 	if cfg.TProxy.Enabled && cfg.TProxy.KillSwitch {
 		return applyKillSwitchFirewall(cfg, paths, result)
 	}
+	return cleanupFirewallFull(cfg, paths, result)
+}
+
+func cleanupFirewallFull(_ managerconfig.Config, paths Paths, result *Result) error {
 	if err := firewall.Cleanup(paths.NftablesInclude); err != nil {
 		return err
 	}

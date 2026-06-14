@@ -153,8 +153,8 @@ func Validate(cfg Config) error {
 				errors = append(errors, fmt.Sprintf("source_rule.%s.source_ip is invalid: %q", id, source))
 			}
 		}
-		if !inSet(rule.Outbound, "direct", "proxy", "block") {
-			errors = append(errors, fmt.Sprintf("source_rule.%s.outbound must be direct, proxy, or block, got %q", id, rule.Outbound))
+		if !inSet(rule.Outbound, "direct", "proxy", "block", "dns") {
+			errors = append(errors, fmt.Sprintf("source_rule.%s.outbound must be direct, proxy, block, or dns, got %q", id, rule.Outbound))
 		}
 	}
 

@@ -210,3 +210,37 @@ func TestCleanupFirewallLeavesKillSwitchOnly(t *testing.T) {
 		t.Fatalf("cleanup did not leave kill switch drop chain:\n%s", got)
 	}
 }
+
+func TestTeardownRemovesKillSwitchFirewall(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.TProxy.Enabled = true
+	cfg.TProxy.KillSwitch = true
+	cfg.TProxy.LANIfnames = []string{"eth2"}
+
+	oldRouteCommand := routeCommand
+	routeCommand = func(args ...string) error {
+		return errors.New("exit status 2: RTNETLINK answers: No such process")
+	}
+	t.Cleanup(func() { routeCommand = oldRouteCommand })
+
+	oldFirewallReload := FirewallReload
+	FirewallReload = func() error { return nil }
+	t.Cleanup(func() { FirewallReload = oldFirewallReload })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "90-singbox-manager.nft")
+	if err := os.WriteFile(path, []byte("chain singbox_manager_kill_switch_forward {}\n"), 0644); err != nil {
+		t.Fatalf("write firewall include: %v", err)
+	}
+
+	_, err := Control(cfg, ActionTeardown, Paths{
+		PIDFile:         filepath.Join(dir, "sing-box.pid"),
+		NftablesInclude: path,
+	}, nil)
+	if err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("kill switch include still exists after teardown: %v", err)
+	}
+}

@@ -384,6 +384,7 @@ function showSourceRuleModal(view, row, profiles, device) {
 				E('select', { 'class': 'cbi-input-select', 'name': 'outbound' }, [
 					E('option', { 'value': 'proxy', 'selected': selected('proxy', row.outbound || 'proxy') }, 'proxy'),
 					E('option', { 'value': 'direct', 'selected': selected('direct', row.outbound) }, 'direct'),
+					E('option', { 'value': 'dns', 'selected': selected('dns', row.outbound) }, 'dns-only'),
 					E('option', { 'value': 'block', 'selected': selected('block', row.outbound) }, 'block')
 				])
 			])

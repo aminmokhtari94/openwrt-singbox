@@ -14,10 +14,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	managerconfig "github.com/openwrt-singbox/singbox-manager/internal/config"
@@ -247,6 +249,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		runServe(os.Args[2:])
+	case "cleanup":
+		runCleanup(os.Args[2:])
 	case "rpcd":
 		runRPCD(os.Args[2:])
 	default:
@@ -295,11 +299,45 @@ func runServe(args []string) {
 	startSubscriptionScheduler(*configPath)
 	startRuleSetScheduler(*configPath)
 	startRuntimeSupervisor(*configPath)
+	startSignalCleanup(*configPath)
 
 	log.Printf("singbox-managerd listening on %s", cfg.SocketPath)
 	if err := http.Serve(listener, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server stopped: %v", err)
 	}
+}
+
+func runCleanup(args []string) {
+	fs := flag.NewFlagSet("cleanup", flag.ExitOnError)
+	configPath := fs.String("config", defaultConfigPath, "UCI config path")
+	_ = fs.Parse(args)
+
+	if err := cleanupRuntime(*configPath); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func startSignalCleanup(configPath string) {
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-signals
+		if err := cleanupRuntime(configPath); err != nil {
+			log.Printf("runtime cleanup after %s failed: %v", sig, err)
+		}
+		os.Exit(0)
+	}()
+}
+
+func cleanupRuntime(configPath string) error {
+	cfg, err := managerconfig.Load(configPath)
+	if err != nil {
+		defaultCfg := managerconfig.DefaultConfig()
+		cfg = &defaultCfg
+	}
+	_, err = runtime.Control(*cfg, runtime.ActionTeardown, runtime.DefaultPaths, render.Render)
+	return err
 }
 
 func startRuntimeSupervisor(configPath string) {

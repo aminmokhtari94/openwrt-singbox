@@ -501,6 +501,49 @@ func TestRenderSourceIPRouteRules(t *testing.T) {
 	}
 }
 
+func TestRenderDNSOnlySourceRoute(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.Manager.ActiveGroup = "home"
+	cfg.Manager.RuntimeMode = "rule"
+	cfg.Groups["home"] = managerconfig.Group{
+		ID:             "home",
+		Enabled:        true,
+		Name:           "Home",
+		Strategy:       "manual",
+		RoutingProfile: "routes",
+	}
+	cfg.Routing["routes"] = managerconfig.RoutingProfile{
+		ID:      "routes",
+		Enabled: true,
+		Name:    "Routes",
+		Mode:    "rule",
+		Final:   "proxy",
+	}
+	cfg.SourceRules["phone_dns"] = managerconfig.SourceRule{
+		ID:       "phone_dns",
+		Enabled:  true,
+		Name:     "Phone DNS",
+		Profile:  "routes",
+		Sources:  []string{"192.168.1.20"},
+		Outbound: "dns",
+	}
+
+	data, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `"protocol": "dns"`) || !strings.Contains(got, `"action": "hijack-dns"`) {
+		t.Fatalf("rendered config missing source DNS hijack rule:\n%s", data)
+	}
+	if !strings.Contains(got, `"outbound": "direct"`) {
+		t.Fatalf("rendered config missing source direct fallback:\n%s", data)
+	}
+	if strings.Index(got, `"action": "hijack-dns"`) > strings.Index(got, `"outbound": "direct"`) {
+		t.Fatalf("DNS hijack rule must be before direct fallback:\n%s", data)
+	}
+}
+
 func TestRenderTUNInbound(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"

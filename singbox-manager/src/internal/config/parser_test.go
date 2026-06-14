@@ -259,6 +259,36 @@ func TestValidateRejectsTProxyAndTUNConflict(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsDNSOnlySourceRule(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Groups["home"] = Group{
+		ID:             "home",
+		Enabled:        true,
+		Name:           "Home",
+		RoutingProfile: "routes",
+		Strategy:       "manual",
+	}
+	cfg.Routing["routes"] = RoutingProfile{
+		ID:      "routes",
+		Enabled: true,
+		Name:    "Routes",
+		Mode:    "rule",
+		Final:   "proxy",
+	}
+	cfg.SourceRules["phone_dns"] = SourceRule{
+		ID:       "phone_dns",
+		Enabled:  true,
+		Name:     "Phone DNS",
+		Profile:  "routes",
+		Sources:  []string{"192.168.1.20"},
+		Outbound: "dns",
+	}
+
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("validate DNS-only source rule: %v", err)
+	}
+}
+
 func TestValidateRejectsInvalidTProxyFilters(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual"}

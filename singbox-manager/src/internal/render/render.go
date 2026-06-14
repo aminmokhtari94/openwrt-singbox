@@ -652,12 +652,25 @@ func renderRoute(cfg managerconfig.Config, proxyTag string, resolvers domainReso
 	}
 
 	for _, rule := range sourceRulesForProfile(cfg, profile.ID) {
+		sourceCIDRs := normalizeSourceCIDRs(rule.Sources)
+		if rule.Outbound == "dns" {
+			route.Rules = append(route.Rules, map[string]any{
+				"source_ip_cidr": sourceCIDRs,
+				"protocol":       "dns",
+				"action":         "hijack-dns",
+			})
+			route.Rules = append(route.Rules, map[string]any{
+				"source_ip_cidr": sourceCIDRs,
+				"outbound":       "direct",
+			})
+			continue
+		}
 		outbound := rule.Outbound
 		if outbound == "proxy" || outbound == "" {
 			outbound = proxyTag
 		}
 		route.Rules = append(route.Rules, map[string]any{
-			"source_ip_cidr": normalizeSourceCIDRs(rule.Sources),
+			"source_ip_cidr": sourceCIDRs,
 			"outbound":       outbound,
 		})
 	}
