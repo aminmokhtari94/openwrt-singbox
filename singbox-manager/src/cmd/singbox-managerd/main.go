@@ -48,6 +48,7 @@ type ManagerConfig struct {
 	PACListen     string `json:"pac_listen"`
 	TProxyEnabled bool   `json:"tproxy_enabled"`
 	DNSHijack     bool   `json:"dns_hijack"`
+	KillSwitch    bool   `json:"kill_switch"`
 	TUNEnabled    bool   `json:"tun_enabled"`
 }
 
@@ -71,6 +72,7 @@ type Status struct {
 	TxBytes            uint64 `json:"tx_bytes"`
 	TProxyEnabled      bool   `json:"tproxy_enabled"`
 	DNSHijack          bool   `json:"dns_hijack"`
+	KillSwitch         bool   `json:"kill_switch"`
 	NftablesInclude    string `json:"nftables_include"`
 	TUNEnabled         bool   `json:"tun_enabled"`
 }
@@ -292,11 +294,25 @@ func runServe(args []string) {
 	startHealthScheduler(*configPath)
 	startSubscriptionScheduler(*configPath)
 	startRuleSetScheduler(*configPath)
+	startRuntimeSupervisor(*configPath)
 
 	log.Printf("singbox-managerd listening on %s", cfg.SocketPath)
 	if err := http.Serve(listener, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server stopped: %v", err)
 	}
+}
+
+func startRuntimeSupervisor(configPath string) {
+	if managedRuntimePID(runtime.DefaultPaths) == 0 {
+		return
+	}
+	cfg, err := managerconfig.Load(configPath)
+	if err != nil {
+		log.Printf("runtime supervision skipped: %v", err)
+		return
+	}
+	runtime.Supervise(*cfg, runtime.DefaultPaths, render.Render)
+	log.Printf("runtime supervision attached to existing sing-box process")
 }
 
 func startSubscriptionScheduler(configPath string) {
@@ -1198,6 +1214,7 @@ func tproxyStatus(configPath string) map[string]any {
 		"exclude_subnet":     cfg.TProxy.ExcludeSubnet,
 		"include_mac":        cfg.TProxy.IncludeMAC,
 		"dns_hijack":         cfg.TProxy.DNSHijack,
+		"kill_switch":        cfg.TProxy.KillSwitch,
 		"tproxy_port":        cfg.Manager.TProxyPort,
 		"dns_port":           cfg.Manager.DNSPort,
 		"nftables_include":   runtime.DefaultPaths.NftablesInclude,
@@ -1522,6 +1539,7 @@ func compactConfig(cfg managerconfig.Config) ManagerConfig {
 		PACListen:     cfg.Manager.PACListen,
 		TProxyEnabled: cfg.TProxy.Enabled,
 		DNSHijack:     cfg.TProxy.DNSHijack,
+		KillSwitch:    cfg.TProxy.KillSwitch,
 		TUNEnabled:    cfg.TUN.Enabled,
 	}
 }
@@ -1564,6 +1582,7 @@ func collectStatus(cfg ManagerConfig) Status {
 		TxBytes:            stats.TxBytes,
 		TProxyEnabled:      cfg.TProxyEnabled,
 		DNSHijack:          cfg.DNSHijack,
+		KillSwitch:         cfg.KillSwitch,
 		NftablesInclude:    runtime.DefaultPaths.NftablesInclude,
 		TUNEnabled:         cfg.TUNEnabled,
 	}

@@ -732,7 +732,7 @@ func readCustomPAC(sec section) (CustomPAC, error) {
 
 func readTProxy(sec section) (TProxy, error) {
 	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "dns_hijack": true,
+		"enabled": true, "dns_hijack": true, "kill_switch": true,
 	}); err != nil {
 		return TProxy{}, err
 	}
@@ -757,6 +757,12 @@ func readTProxy(sec section) (TProxy, error) {
 	}
 	if value, ok := sec.options["dns_hijack"]; ok {
 		tproxy.DNSHijack, err = parseBool(sec, "dns_hijack", value)
+		if err != nil {
+			return TProxy{}, err
+		}
+	}
+	if value, ok := sec.options["kill_switch"]; ok {
+		tproxy.KillSwitch, err = parseBool(sec, "kill_switch", value)
 		if err != nil {
 			return TProxy{}, err
 		}

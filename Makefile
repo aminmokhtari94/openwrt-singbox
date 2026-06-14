@@ -32,23 +32,30 @@ VM_BASE_IMAGE_GZ := $(VM_BASE_IMAGE).gz
 VM_DISK ?= $(VM_DIR)/openwrt-test.qcow2
 VM_MEM ?= 512
 VM_CONTROL_NET ?= 192.168.1.0/24
-VM_WAN_NET ?= 10.0.2.0/24
 VM_FACTORY_IP ?= 192.168.1.1
 VM_GUEST_IP ?= 192.168.200.1
 VM_GUEST_NETMASK ?= 255.255.255.0
+VM_WAN_IP ?= 10.0.200.2
+VM_WAN_NET ?= 10.0.200.0/24
+VM_WAN_NETMASK ?= 255.255.255.0
+VM_WAN_GATEWAY ?= 10.0.200.1
 VM_CONTROL_MAC ?= 52:54:00:12:34:56
 VM_WAN_MAC ?= 52:54:00:12:34:57
 VM_LAN_MAC ?= 52:54:00:12:34:58
 VM_LAN_DEVICE ?= eth2
+VM_WAN_DEVICE ?= eth1
 VM_SSH_PORT ?= 2222
 VM_HTTP_PORT ?= 18080
-VM_SSH_OPTS ?= -F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/tmp/openwrt-singbox-known_hosts -o BatchMode=yes -o ConnectTimeout=2
+VM_SSH_OPTS ?= -F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o LogLevel=ERROR -o BatchMode=yes -o ConnectTimeout=2
 VM_SSH_WAIT ?= 60
 VM_SSH = ssh $(VM_SSH_OPTS) root@$(VM_GUEST_IP)
 VM_BOOTSTRAP_SSH = ssh -p $(VM_SSH_PORT) $(VM_SSH_OPTS) root@127.0.0.1
 VM_LAN_BRIDGE ?= owrt-lab0
 VM_LAN_TAP ?= owrt-lan0
 VM_HOST_LAN_IP ?= 192.168.200.254/24
+VM_WAN_TAP ?= owrt-wan0
+VM_HOST_WAN_IP ?= $(VM_WAN_GATEWAY)/24
+OPENWRT_LAB_ROUTER_SCRIPT := scripts/openwrt-lab-router.sh
 
 ALPINE_VERSION ?= 3.24.0
 ALPINE_ARCH ?= x86_64
@@ -57,12 +64,14 @@ ALPINE_ISO ?= $(VM_DIR)/alpine-virt-$(ALPINE_VERSION)-$(ALPINE_ARCH).iso
 ALPINE_MEM ?= 512
 ALPINE_TAP ?= alpine-lan0
 ALPINE_LAN_MAC ?= 52:54:00:12:34:66
+ALPINE_GUEST_IP ?= 192.168.200.2/24
+ALPINE_GATEWAY ?= $(VM_GUEST_IP)
 
 IPK_DIR ?= dist
 OPENWRT_PACKAGES ?= $(strip $(wildcard $(IPK_DIR)/*.ipk) $(wildcard $(IPK_DIR)/*.apk))
 IPKS ?= $(OPENWRT_PACKAGES)
 
-.PHONY: help test build smoke sdk ensure-sdk sdk-check sdk-link ipk build-ipk vm-image vm-net-up vm-net-down vm-run vm-ssh alpine-iso alpine-run proxy-test-help deploy vm-clean
+.PHONY: help test build smoke sdk ensure-sdk sdk-check sdk-link ipk build-ipk vm-image vm-net-up vm-net-down vm-run vm-configure-router vm-ssh alpine-iso alpine-run proxy-test-help deploy vm-clean
 
 help:
 	@printf '%s\n' \
@@ -73,7 +82,8 @@ help:
 		'  make ipk        Build OpenWrt packages into IPK_DIR=dist' \
 		'  make smoke      Run local rpcd smoke checks' \
 		'  make vm-image   Download OpenWrt image and create qcow2 overlay' \
-		'  make vm-run     Boot OpenWrt VM on isolated lab LAN and DHCP WAN' \
+		'  make vm-run     Boot OpenWrt VM on isolated lab LAN and host-NAT WAN' \
+		'  make vm-configure-router Reapply OpenWrt lab router NAT/firewall' \
 		'  make vm-ssh     SSH into the running VM' \
 		'  make alpine-run Boot Alpine VM attached to the OpenWrt lab LAN' \
 		'  make proxy-test-help Show Alpine connectivity/proxy test commands' \
@@ -219,6 +229,24 @@ vm-image: $(VM_DISK)
 vm-net-up:
 	@set -e; \
 	user=$$(id -un); \
+	add_filter_rule() { \
+		chain="$$1"; \
+		shift; \
+		sudo iptables -C "$$chain" "$$@" 2>/dev/null || sudo iptables -I "$$chain" 1 "$$@"; \
+	}; \
+	add_optional_filter_rule() { \
+		chain="$$1"; \
+		shift; \
+		if ! sudo iptables -C "$$chain" "$$@" 2>/dev/null; then \
+			sudo iptables -I "$$chain" 1 "$$@" 2>/dev/null || true; \
+		fi; \
+	}; \
+	add_nat_rule() { \
+		chain="$$1"; \
+		shift; \
+		sudo iptables -t nat -C "$$chain" "$$@" 2>/dev/null || sudo iptables -t nat -I "$$chain" 1 "$$@"; \
+	}; \
+	sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null; \
 	if ! sudo ip link show "$(VM_LAN_BRIDGE)" >/dev/null 2>&1; then \
 		sudo ip link add name "$(VM_LAN_BRIDGE)" type bridge; \
 	fi; \
@@ -232,10 +260,51 @@ vm-net-up:
 		sudo ip link set "$$tap" master "$(VM_LAN_BRIDGE)"; \
 		sudo ip link set "$$tap" up; \
 	done; \
-	printf 'Lab LAN ready: bridge %s host %s, OpenWrt tap %s, Alpine tap %s\n' "$(VM_LAN_BRIDGE)" "$(VM_HOST_LAN_IP)" "$(VM_LAN_TAP)" "$(ALPINE_TAP)"
+	if ! sudo ip link show "$(VM_WAN_TAP)" >/dev/null 2>&1; then \
+		sudo ip tuntap add dev "$(VM_WAN_TAP)" mode tap user "$$user"; \
+	fi; \
+	sudo ip addr flush dev "$(VM_WAN_TAP)"; \
+	sudo ip addr replace "$(VM_HOST_WAN_IP)" dev "$(VM_WAN_TAP)"; \
+	sudo ip link set "$(VM_WAN_TAP)" up; \
+	add_filter_rule FORWARD -i "$(VM_WAN_TAP)" -j ACCEPT; \
+	add_filter_rule FORWARD -o "$(VM_WAN_TAP)" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; \
+	add_filter_rule FORWARD -i "$(VM_LAN_BRIDGE)" -o "$(VM_LAN_BRIDGE)" -j ACCEPT; \
+	add_optional_filter_rule FORWARD -i "$(ALPINE_TAP)" -o "$(VM_LAN_TAP)" -j ACCEPT; \
+	add_optional_filter_rule FORWARD -i "$(VM_LAN_TAP)" -o "$(ALPINE_TAP)" -j ACCEPT; \
+	add_optional_filter_rule FORWARD -m physdev --physdev-is-bridged --physdev-in "$(ALPINE_TAP)" --physdev-out "$(VM_LAN_TAP)" -j ACCEPT; \
+	add_optional_filter_rule FORWARD -m physdev --physdev-is-bridged --physdev-in "$(VM_LAN_TAP)" --physdev-out "$(ALPINE_TAP)" -j ACCEPT; \
+	add_nat_rule POSTROUTING -s "$(VM_WAN_NET)" -j MASQUERADE; \
+	printf 'Lab LAN ready: bridge %s host %s, OpenWrt tap %s, Alpine tap %s\n' "$(VM_LAN_BRIDGE)" "$(VM_HOST_LAN_IP)" "$(VM_LAN_TAP)" "$(ALPINE_TAP)"; \
+	printf 'Lab WAN ready: tap %s host %s, OpenWrt WAN %s via %s\n' "$(VM_WAN_TAP)" "$(VM_HOST_WAN_IP)" "$(VM_WAN_IP)" "$(VM_WAN_GATEWAY)"
 
 vm-net-down:
 	@set -e; \
+	delete_filter_rule() { \
+		chain="$$1"; \
+		shift; \
+		while sudo iptables -C "$$chain" "$$@" 2>/dev/null; do \
+			sudo iptables -D "$$chain" "$$@"; \
+		done; \
+	}; \
+	delete_nat_rule() { \
+		chain="$$1"; \
+		shift; \
+		while sudo iptables -t nat -C "$$chain" "$$@" 2>/dev/null; do \
+			sudo iptables -t nat -D "$$chain" "$$@"; \
+		done; \
+	}; \
+	delete_nat_rule POSTROUTING -s "$(VM_WAN_NET)" -j MASQUERADE; \
+	delete_filter_rule FORWARD -i "$(VM_WAN_TAP)" -j ACCEPT; \
+	delete_filter_rule FORWARD -o "$(VM_WAN_TAP)" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT; \
+	delete_filter_rule FORWARD -i "$(VM_LAN_BRIDGE)" -o "$(VM_LAN_BRIDGE)" -j ACCEPT; \
+	delete_filter_rule FORWARD -i "$(ALPINE_TAP)" -o "$(VM_LAN_TAP)" -j ACCEPT; \
+	delete_filter_rule FORWARD -i "$(VM_LAN_TAP)" -o "$(ALPINE_TAP)" -j ACCEPT; \
+	delete_filter_rule FORWARD -m physdev --physdev-is-bridged --physdev-in "$(ALPINE_TAP)" --physdev-out "$(VM_LAN_TAP)" -j ACCEPT; \
+	delete_filter_rule FORWARD -m physdev --physdev-is-bridged --physdev-in "$(VM_LAN_TAP)" --physdev-out "$(ALPINE_TAP)" -j ACCEPT; \
+	if sudo ip link show "$(VM_WAN_TAP)" >/dev/null 2>&1; then \
+		sudo ip link set "$(VM_WAN_TAP)" down 2>/dev/null || true; \
+		sudo ip link delete "$(VM_WAN_TAP)" 2>/dev/null || true; \
+	fi; \
 	for tap in "$(VM_LAN_TAP)" "$(ALPINE_TAP)"; do \
 		if sudo ip link show "$$tap" >/dev/null 2>&1; then \
 			sudo ip link set "$$tap" down 2>/dev/null || true; \
@@ -247,14 +316,14 @@ vm-net-down:
 		sudo ip link delete "$(VM_LAN_BRIDGE)" 2>/dev/null || true; \
 	fi
 
-vm-run: $(VM_DISK) vm-net-up
+vm-run: $(VM_DISK) $(OPENWRT_LAB_ROUTER_SCRIPT) vm-net-up
 	@set -e; \
 	qemu-system-x86_64 \
 		-enable-kvm \
 		-m $(VM_MEM) \
 		-drive file=$(VM_DISK),format=qcow2,if=virtio \
 		-netdev user,id=control,net=$(VM_CONTROL_NET),hostfwd=tcp:127.0.0.1:$(VM_SSH_PORT)-$(VM_FACTORY_IP):22,hostfwd=tcp:127.0.0.1:$(VM_HTTP_PORT)-$(VM_FACTORY_IP):80 \
-		-netdev user,id=wan,net=$(VM_WAN_NET) \
+		-netdev tap,id=wan,ifname=$(VM_WAN_TAP),script=no,downscript=no \
 		-netdev tap,id=lan,ifname=$(VM_LAN_TAP),script=no,downscript=no \
 		-device virtio-net-pci,netdev=control,mac=$(VM_CONTROL_MAC) \
 		-device virtio-net-pci,netdev=wan,mac=$(VM_WAN_MAC) \
@@ -289,48 +358,36 @@ vm-run: $(VM_DISK) vm-net-up
 		printf 'Timed out waiting for OpenWrt SSH after %s seconds\n' '$(VM_SSH_WAIT)'; \
 		exit 1; \
 	fi; \
+	config_ssh='$(VM_SSH)'; \
 	if [ "$$ready_path" = 'bootstrap' ]; then \
-		printf 'Configuring OpenWrt lab LAN on %s (%s)...\n' '$(VM_GUEST_IP)' '$(VM_LAN_DEVICE)'; \
-		printf '%s\n' \
-			'set network.lan.device=$(VM_LAN_DEVICE)' \
-			'set network.lan.ipaddr=$(VM_GUEST_IP)' \
-			'set network.lan.netmask=$(VM_GUEST_NETMASK)' \
-			'delete network.wan' \
-			'set network.wan=interface' \
-			'set network.wan.device=eth1' \
-			'set network.wan.proto=dhcp' \
-			'delete network.wan6' \
-			'set network.wan6=interface' \
-			'set network.wan6.device=eth1' \
-			'set network.wan6.proto=dhcpv6' \
-			'set network.wan6.reqaddress=try' \
-			'set network.wan6.reqprefix=auto' \
-			'commit network' \
-			| $(VM_BOOTSTRAP_SSH) 'uci -q batch'; \
-		$(VM_BOOTSTRAP_SSH) '/etc/init.d/network reload; ifup lan; ifup wan; ifup wan6 || true' || true; \
-		sleep 3; \
-		printf 'Waiting for OpenWrt lab SSH on %s...\n' '$(VM_GUEST_IP)'; \
-		ready=0; \
-		i=0; \
-		while [ $$i -lt $(VM_SSH_WAIT) ]; do \
-			if ! kill -0 $$qemu_pid 2>/dev/null; then \
-				echo 'QEMU exited before lab SSH became ready'; \
-				wait $$qemu_pid; \
-				exit 1; \
-			fi; \
-			if $(VM_SSH) true >/dev/null 2>&1; then \
-				ready=1; \
-				break; \
-			fi; \
-			i=$$((i + 1)); \
-			sleep 1; \
-		done; \
-		if [ $$ready -ne 1 ]; then \
-			printf 'Timed out waiting for OpenWrt lab SSH after %s seconds\n' '$(VM_SSH_WAIT)'; \
+		config_ssh='$(VM_BOOTSTRAP_SSH)'; \
+	fi; \
+	printf 'Configuring OpenWrt lab router: LAN %s=%s/%s, WAN %s...\n' '$(VM_LAN_DEVICE)' '$(VM_GUEST_IP)' '$(VM_GUEST_NETMASK)' '$(VM_WAN_DEVICE)'; \
+	$$config_ssh 'sh -s -- "$(VM_LAN_DEVICE)" "$(VM_GUEST_IP)" "$(VM_GUEST_NETMASK)" "$(VM_WAN_DEVICE)" static "$(VM_WAN_IP)" "$(VM_WAN_NETMASK)" "$(VM_WAN_GATEWAY)"' < "$(OPENWRT_LAB_ROUTER_SCRIPT)"; \
+	$$config_ssh '/etc/init.d/network reload; [ ! -x /etc/init.d/firewall ] || /etc/init.d/firewall restart; ifup lan; ifup wan; ifup wan6 || true' || true; \
+	sleep 3; \
+	printf 'Waiting for OpenWrt lab SSH on %s...\n' '$(VM_GUEST_IP)'; \
+	ready=0; \
+	i=0; \
+	while [ $$i -lt $(VM_SSH_WAIT) ]; do \
+		if ! kill -0 $$qemu_pid 2>/dev/null; then \
+			echo 'QEMU exited before lab SSH became ready'; \
+			wait $$qemu_pid; \
 			exit 1; \
 		fi; \
+		if $(VM_SSH) true >/dev/null 2>&1; then \
+			ready=1; \
+			break; \
+		fi; \
+		i=$$((i + 1)); \
+		sleep 1; \
+	done; \
+	if [ $$ready -ne 1 ]; then \
+		printf 'Timed out waiting for OpenWrt lab SSH after %s seconds\n' '$(VM_SSH_WAIT)'; \
+		exit 1; \
 	fi; \
 	$(VM_SSH) 'ubus call network.interface.wan status || true' || true; \
+	$(VM_SSH) 'uci -q show firewall.lab_wan; uci -q show firewall.lab_lan_wan || true' || true; \
 	printf 'OpenWrt VM is running. SSH: make vm-ssh, LuCI: http://%s/. In another terminal: make alpine-run\n' '$(VM_GUEST_IP)'; \
 	wait $$qemu_pid; \
 	status=$$?; \
@@ -339,6 +396,11 @@ vm-run: $(VM_DISK) vm-net-up
 
 vm-ssh:
 	$(VM_SSH)
+
+vm-configure-router: $(OPENWRT_LAB_ROUTER_SCRIPT)
+	$(VM_SSH) 'sh -s -- "$(VM_LAN_DEVICE)" "$(VM_GUEST_IP)" "$(VM_GUEST_NETMASK)" "$(VM_WAN_DEVICE)" static "$(VM_WAN_IP)" "$(VM_WAN_NETMASK)" "$(VM_WAN_GATEWAY)"' < "$(OPENWRT_LAB_ROUTER_SCRIPT)"
+	$(VM_SSH) '/etc/init.d/network reload; [ ! -x /etc/init.d/firewall ] || /etc/init.d/firewall restart; ifup lan; ifup wan; ifup wan6 || true' || true
+	$(VM_SSH) 'uci -q show firewall.lab_wan; uci -q show firewall.lab_lan_wan || true'
 
 $(ALPINE_ISO).sha256: | $(VM_DIR)
 	wget -O $@ $(ALPINE_BASE_URL)/$(notdir $@)
@@ -362,10 +424,15 @@ alpine-run: $(ALPINE_ISO) vm-net-up
 proxy-test-help:
 	@printf '%s\n' \
 		'Inside Alpine:' \
-		'  udhcpc -i eth0 || true' \
+		'  ip link set eth0 up' \
+		'  udhcpc -i eth0 -q || ip addr add $(ALPINE_GUEST_IP) dev eth0' \
+		'  ip route replace default via $(ALPINE_GATEWAY)' \
 		'  ip addr show eth0' \
 		'  ip route' \
 		'  ping -c 3 $(VM_GUEST_IP)' \
+		'  ping -c 3 1.1.1.1' \
+		'  printf "nameserver 1.1.1.1\n" > /etc/resolv.conf' \
+		'  wget -O- http://example.com/' \
 		'  wget -O- http://$(VM_GUEST_IP):1088/proxy.pac' \
 		'  http_proxy=http://$(VM_GUEST_IP):2080 wget -O- http://example.com/' \
 		'' \

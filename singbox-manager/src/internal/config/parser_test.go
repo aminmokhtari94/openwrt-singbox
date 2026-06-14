@@ -66,6 +66,7 @@ config pac_custom 'office'
 
 config tproxy 'tproxy'
 	option enabled '0'
+	option kill_switch '1'
 
 config tun 'tun'
 	option enabled '0'
@@ -99,6 +100,9 @@ config tun 'tun'
 	}
 	if cfg.CustomPACs["office"].Content == "" {
 		t.Fatal("expected custom PAC content")
+	}
+	if !cfg.TProxy.KillSwitch {
+		t.Fatal("expected tproxy kill switch")
 	}
 }
 

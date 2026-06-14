@@ -35,6 +35,8 @@ function renderStatus(data) {
 			E('div', {}, valueOrDash(data.tproxy_port)),
 			E('div', { 'class': 'singbox-manager-label' }, _('DNS Hijacking')),
 			E('div', {}, data.dns_hijack ? _('Yes') : _('No')),
+			E('div', { 'class': 'singbox-manager-label' }, _('Kill Switch')),
+			E('div', {}, data.kill_switch ? _('Yes') : _('No')),
 			E('div', { 'class': 'singbox-manager-label' }, _('DNS Port')),
 			E('div', {}, valueOrDash(data.dns_port)),
 			E('div', { 'class': 'singbox-manager-label' }, _('Include Subnets')),
@@ -87,6 +89,10 @@ function renderForm() {
 	o.rmempty = true;
 
 	o = s.option(form.Flag, 'dns_hijack', _('DNS Hijacking'));
+	o.default = '0';
+	o.rmempty = false;
+
+	o = s.option(form.Flag, 'kill_switch', _('Kill Switch'));
 	o.default = '0';
 	o.rmempty = false;
 

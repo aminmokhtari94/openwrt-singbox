@@ -190,6 +190,7 @@ config tproxy 'tproxy'
 	list exclude_subnet '192.168.0.0/16'
 	list include_mac ''
 	option dns_hijack '0'
+	option kill_switch '0'
 
 config tun 'tun'
 	option enabled '0'

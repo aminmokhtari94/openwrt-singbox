@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	managerconfig "github.com/openwrt-singbox/singbox-manager/internal/config"
 )
 
 func TestStatusAliveTreatsZombieAsStopped(t *testing.T) {
@@ -47,7 +49,11 @@ func TestApplyTProxyRoutesAddsPolicyRoutes(t *testing.T) {
 	var commands []string
 	oldRouteCommand := routeCommand
 	routeCommand = func(args ...string) error {
-		commands = append(commands, strings.Join(args, " "))
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if strings.Contains(command, " rule del ") {
+			return errors.New("exit status 2: RTNETLINK answers: No such process")
+		}
 		return nil
 	}
 	t.Cleanup(func() { routeCommand = oldRouteCommand })
@@ -56,10 +62,12 @@ func TestApplyTProxyRoutesAddsPolicyRoutes(t *testing.T) {
 		t.Fatalf("apply tproxy routes: %v", err)
 	}
 	want := []string{
-		"ip -4 rule add fwmark 0x1 lookup 100",
 		"ip -4 route add local 0.0.0.0/0 dev lo table 100",
-		"ip -6 rule add fwmark 0x1 lookup 100",
 		"ip -6 route add local ::/0 dev lo table 100",
+		"ip -4 rule del fwmark 0x1 lookup 100",
+		"ip -4 rule add fwmark 0x1 lookup 100",
+		"ip -6 rule del fwmark 0x1 lookup 100",
+		"ip -6 rule add fwmark 0x1 lookup 100",
 	}
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -69,7 +77,14 @@ func TestApplyTProxyRoutesAddsPolicyRoutes(t *testing.T) {
 func TestApplyTProxyRoutesIgnoresExistingRoutes(t *testing.T) {
 	oldRouteCommand := routeCommand
 	routeCommand = func(args ...string) error {
-		return errors.New("exit status 2: RTNETLINK answers: File exists")
+		command := strings.Join(args, " ")
+		if strings.Contains(command, " route add ") {
+			return errors.New("exit status 2: RTNETLINK answers: File exists")
+		}
+		if strings.Contains(command, " rule del ") {
+			return errors.New("exit status 2: RTNETLINK answers: No such process")
+		}
+		return nil
 	}
 	t.Cleanup(func() { routeCommand = oldRouteCommand })
 
@@ -80,9 +95,17 @@ func TestApplyTProxyRoutesIgnoresExistingRoutes(t *testing.T) {
 
 func TestCleanupTProxyRoutesDeletesPolicyRoutes(t *testing.T) {
 	var commands []string
+	deleted := map[string]bool{}
 	oldRouteCommand := routeCommand
 	routeCommand = func(args ...string) error {
-		commands = append(commands, strings.Join(args, " "))
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if strings.Contains(command, " rule del ") {
+			if deleted[command] {
+				return errors.New("exit status 2: RTNETLINK answers: No such process")
+			}
+			deleted[command] = true
+		}
 		return nil
 	}
 	t.Cleanup(func() { routeCommand = oldRouteCommand })
@@ -92,9 +115,50 @@ func TestCleanupTProxyRoutesDeletesPolicyRoutes(t *testing.T) {
 	}
 	want := []string{
 		"ip -4 rule del fwmark 0x1 lookup 100",
-		"ip -4 route del local 0.0.0.0/0 dev lo table 100",
+		"ip -4 rule del fwmark 0x1 lookup 100",
 		"ip -6 rule del fwmark 0x1 lookup 100",
+		"ip -6 rule del fwmark 0x1 lookup 100",
+		"ip -4 route del local 0.0.0.0/0 dev lo table 100",
 		"ip -6 route del local ::/0 dev lo table 100",
+	}
+	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestApplyTProxyRoutesRemovesDuplicatePolicyRules(t *testing.T) {
+	var commands []string
+	deletesLeft := map[string]int{
+		"ip -4 rule del fwmark 0x1 lookup 100": 2,
+		"ip -6 rule del fwmark 0x1 lookup 100": 1,
+	}
+	oldRouteCommand := routeCommand
+	routeCommand = func(args ...string) error {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		if strings.Contains(command, " rule del ") {
+			if deletesLeft[command] == 0 {
+				return errors.New("exit status 2: RTNETLINK answers: No such process")
+			}
+			deletesLeft[command]--
+		}
+		return nil
+	}
+	t.Cleanup(func() { routeCommand = oldRouteCommand })
+
+	if err := applyTProxyRoutes(); err != nil {
+		t.Fatalf("apply tproxy routes: %v", err)
+	}
+	want := []string{
+		"ip -4 route add local 0.0.0.0/0 dev lo table 100",
+		"ip -6 route add local ::/0 dev lo table 100",
+		"ip -4 rule del fwmark 0x1 lookup 100",
+		"ip -4 rule del fwmark 0x1 lookup 100",
+		"ip -4 rule del fwmark 0x1 lookup 100",
+		"ip -4 rule add fwmark 0x1 lookup 100",
+		"ip -6 rule del fwmark 0x1 lookup 100",
+		"ip -6 rule del fwmark 0x1 lookup 100",
+		"ip -6 rule add fwmark 0x1 lookup 100",
 	}
 	if strings.Join(commands, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
@@ -110,5 +174,39 @@ func TestCleanupTProxyRoutesIgnoresMissingRoutes(t *testing.T) {
 
 	if err := cleanupTProxyRoutes(); err != nil {
 		t.Fatalf("cleanup tproxy routes should ignore missing route errors: %v", err)
+	}
+}
+
+func TestCleanupFirewallLeavesKillSwitchOnly(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.TProxy.Enabled = true
+	cfg.TProxy.KillSwitch = true
+	cfg.TProxy.LANIfnames = []string{"eth2"}
+
+	oldRouteCommand := routeCommand
+	routeCommand = func(args ...string) error {
+		return errors.New("exit status 2: RTNETLINK answers: No such process")
+	}
+	t.Cleanup(func() { routeCommand = oldRouteCommand })
+
+	oldFirewallReload := FirewallReload
+	FirewallReload = func() error { return nil }
+	t.Cleanup(func() { FirewallReload = oldFirewallReload })
+
+	path := filepath.Join(t.TempDir(), "90-singbox-manager.nft")
+	result := Result{}
+	if err := cleanupFirewall(cfg, Paths{NftablesInclude: path}, &result); err != nil {
+		t.Fatalf("cleanup firewall: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read kill switch include: %v", err)
+	}
+	got := string(data)
+	if strings.Contains(got, "singbox_manager_tproxy_prerouting") {
+		t.Fatalf("cleanup left tproxy chain in kill switch mode:\n%s", got)
+	}
+	if !strings.Contains(got, "singbox_manager_kill_switch_forward") || !strings.Contains(got, "counter drop") {
+		t.Fatalf("cleanup did not leave kill switch drop chain:\n%s", got)
 	}
 }

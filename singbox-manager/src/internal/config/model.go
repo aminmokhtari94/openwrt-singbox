@@ -167,6 +167,7 @@ type TProxy struct {
 	ExcludeSubnet []string
 	IncludeMAC    []string
 	DNSHijack     bool
+	KillSwitch    bool
 }
 
 type TUN struct {
