@@ -10,13 +10,10 @@ type Config struct {
 	Groups        map[string]Group
 	Subscriptions map[string]Subscription
 	Nodes         map[string]Node
-	Routing       map[string]RoutingProfile
-	DNSProfiles   map[string]DNSProfile
 	DNSServers    map[string]DNSServer
+	DNSRules      map[string]DNSRule
+	RouteRules    map[string]RouteRule
 	RuleSets      map[string]RuleSet
-	SourceRules   map[string]SourceRule
-	PAC           PAC
-	CustomPACs    map[string]CustomPAC
 	TProxy        TProxy
 	TUN           TUN
 }
@@ -29,7 +26,6 @@ type Manager struct {
 	SingBoxBinary  string
 	SocketPath     string
 	APIListen      string
-	PACListen      string
 	MixedListen    string
 	MixedPort      int
 	TProxyPort     int
@@ -37,18 +33,21 @@ type Manager struct {
 	UpdateInterval string
 }
 
+// Group bundles a set of subscriptions, a proxy selection strategy, and the
+// routing/DNS defaults that apply while the group is active. Routing and DNS
+// rules reference a group by ID; there is no longer a separate profile layer.
 type Group struct {
-	ID             string
-	Enabled        bool
-	Name           string
-	Subscriptions  []string
-	RoutingProfile string
-	DNSProfile     string
-	Strategy       string
-	SelectedNode   string
-	Health         string `json:"health"`
-	LatencyMS      int    `json:"latency_ms"`
-	LastCheck      string `json:"last_check"`
+	ID            string   `json:"id"`
+	Enabled       bool     `json:"enabled"`
+	Name          string   `json:"name"`
+	Subscriptions []string `json:"subscriptions"`
+	Strategy      string   `json:"strategy"`
+	SelectedNode  string   `json:"selected_node"`
+	RouteFinal    string   `json:"route_final"`
+	DNSFinal      string   `json:"dns_final"`
+	Health        string   `json:"health"`
+	LatencyMS     int      `json:"latency_ms"`
+	LastCheck     string   `json:"last_check"`
 }
 
 type Subscription struct {
@@ -94,33 +93,7 @@ type Node struct {
 	LastCheck    string `json:"last_check"`
 }
 
-type RoutingProfile struct {
-	ID       string   `json:"id"`
-	Enabled  bool     `json:"enabled"`
-	Name     string   `json:"name"`
-	Mode     string   `json:"mode"`
-	RuleSets []string `json:"rulesets"`
-	Final    string   `json:"final"`
-}
-
-type SourceRule struct {
-	ID       string   `json:"id"`
-	Enabled  bool     `json:"enabled"`
-	Name     string   `json:"name"`
-	Profile  string   `json:"profile"`
-	Sources  []string `json:"sources"`
-	Outbound string   `json:"outbound"`
-}
-
-type DNSProfile struct {
-	ID      string   `json:"id"`
-	Enabled bool     `json:"enabled"`
-	Name    string   `json:"name"`
-	Mode    string   `json:"mode"`
-	Servers []string `json:"servers"`
-	Hijack  bool     `json:"hijack"`
-}
-
+// DNSServer is an upstream resolver definition shared across groups.
 type DNSServer struct {
 	ID      string `json:"id"`
 	Enabled bool   `json:"enabled"`
@@ -128,6 +101,31 @@ type DNSServer struct {
 	Type    string `json:"type"`
 	Address string `json:"address"`
 	Detour  string `json:"detour"`
+}
+
+// DNSRule selects a DNS server for traffic that matches a set of source IPs
+// and/or rule sets. It renders to a sing-box dns.rules entry.
+type DNSRule struct {
+	ID       string   `json:"id"`
+	Enabled  bool     `json:"enabled"`
+	Name     string   `json:"name"`
+	Group    string   `json:"group"`
+	Sources  []string `json:"sources"`
+	RuleSets []string `json:"rulesets"`
+	Server   string   `json:"server"`
+}
+
+// RouteRule sends matching traffic to an outbound. A rule may match on source
+// IPs, rule sets, or both (an AND match), which renders to a single sing-box
+// route.rules entry.
+type RouteRule struct {
+	ID       string   `json:"id"`
+	Enabled  bool     `json:"enabled"`
+	Name     string   `json:"name"`
+	Group    string   `json:"group"`
+	Sources  []string `json:"sources"`
+	RuleSets []string `json:"rulesets"`
+	Outbound string   `json:"outbound"`
 }
 
 type RuleSet struct {
@@ -141,23 +139,6 @@ type RuleSet struct {
 	UpdateInterval string `json:"update_interval"`
 	LastUpdate     string `json:"last_update"`
 	LastError      string `json:"last_error"`
-}
-
-type PAC struct {
-	Enabled        bool     `json:"enabled"`
-	Source         string   `json:"source"`
-	SelectedCustom string   `json:"selected_custom"`
-	LocalBypass    bool     `json:"local_bypass"`
-	CustomRules    []string `json:"custom_rules"`
-	Whitelist      []string `json:"whitelist"`
-	Blacklist      []string `json:"blacklist"`
-}
-
-type CustomPAC struct {
-	ID      string `json:"id"`
-	Enabled bool   `json:"enabled"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
 }
 
 type TProxy struct {
@@ -188,7 +169,6 @@ func DefaultConfig() Config {
 			SingBoxBinary:  DefaultSingBoxBinary,
 			SocketPath:     DefaultSocketPath,
 			APIListen:      "127.0.0.1:9090",
-			PACListen:      "0.0.0.0:1088",
 			MixedListen:    "0.0.0.0",
 			MixedPort:      2080,
 			TProxyPort:     7893,
@@ -198,17 +178,10 @@ func DefaultConfig() Config {
 		Groups:        map[string]Group{},
 		Subscriptions: map[string]Subscription{},
 		Nodes:         map[string]Node{},
-		Routing:       map[string]RoutingProfile{},
-		DNSProfiles:   map[string]DNSProfile{},
 		DNSServers:    map[string]DNSServer{},
+		DNSRules:      map[string]DNSRule{},
+		RouteRules:    map[string]RouteRule{},
 		RuleSets:      map[string]RuleSet{},
-		SourceRules:   map[string]SourceRule{},
-		CustomPACs:    map[string]CustomPAC{},
-		PAC: PAC{
-			Enabled:     false,
-			Source:      "generated",
-			LocalBypass: true,
-		},
 		TProxy: TProxy{
 			Enabled: false,
 		},
@@ -230,30 +203,6 @@ func (cfg Config) ActiveGroup() *Group {
 	return &group
 }
 
-func (cfg Config) ActiveRoutingProfile() *RoutingProfile {
-	group := cfg.ActiveGroup()
-	if group == nil || group.RoutingProfile == "" {
-		return nil
-	}
-	profile, ok := cfg.Routing[group.RoutingProfile]
-	if !ok {
-		return nil
-	}
-	return &profile
-}
-
-func (cfg Config) ActiveDNSProfile() *DNSProfile {
-	group := cfg.ActiveGroup()
-	if group == nil || group.DNSProfile == "" {
-		return nil
-	}
-	profile, ok := cfg.DNSProfiles[group.DNSProfile]
-	if !ok {
-		return nil
-	}
-	return &profile
-}
-
 func (cfg Config) ActiveNode() *Node {
 	group := cfg.ActiveGroup()
 	if group == nil || group.SelectedNode == "" {
@@ -264,4 +213,38 @@ func (cfg Config) ActiveNode() *Node {
 		return nil
 	}
 	return &node
+}
+
+// DNSRulesForGroup returns the enabled DNS rules bound to the given group,
+// ordered by ID so first-match precedence is deterministic.
+func (cfg Config) DNSRulesForGroup(groupID string) []DNSRule {
+	rules := make([]DNSRule, 0, len(cfg.DNSRules))
+	for _, rule := range cfg.DNSRules {
+		if rule.Enabled && rule.Group == groupID {
+			rules = append(rules, rule)
+		}
+	}
+	sortByID(rules, func(r DNSRule) string { return r.ID })
+	return rules
+}
+
+// RouteRulesForGroup returns the enabled route rules bound to the given group,
+// ordered by ID so first-match precedence is deterministic.
+func (cfg Config) RouteRulesForGroup(groupID string) []RouteRule {
+	rules := make([]RouteRule, 0, len(cfg.RouteRules))
+	for _, rule := range cfg.RouteRules {
+		if rule.Enabled && rule.Group == groupID {
+			rules = append(rules, rule)
+		}
+	}
+	sortByID(rules, func(r RouteRule) string { return r.ID })
+	return rules
+}
+
+func sortByID[T any](items []T, id func(T) string) {
+	for i := 1; i < len(items); i++ {
+		for j := i; j > 0 && id(items[j-1]) > id(items[j]); j-- {
+			items[j-1], items[j] = items[j], items[j-1]
+		}
+	}
 }

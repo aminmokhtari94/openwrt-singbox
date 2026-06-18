@@ -40,6 +40,73 @@ func TestParseDetectsBase64Subscription(t *testing.T) {
 	}
 }
 
+func TestParseSingBoxJSONConfig(t *testing.T) {
+	config := `{
+		"log": {"level": "warn"},
+		"dns": {"servers": [{"type": "udp", "tag": "dns-remote", "server": "1.1.1.2", "detour": "proxy"}]},
+		"inbounds": [{"type": "tun", "tag": "tun-in"}],
+		"outbounds": [
+			{"type": "selector", "tag": "proxy", "outbounds": ["amin shadowsocks"]},
+			{"type": "urltest", "tag": "Best Latency", "outbounds": ["amin shadowsocks"]},
+			{"type": "direct", "tag": "direct"},
+			{"type": "shadowsocks", "tag": "amin shadowsocks", "server": "n1.uppc.site", "server_port": 1080, "method": "chacha20-ietf-poly1305", "password": "GK_pass"},
+			{"type": "vmess", "tag": "amin vmess ws tls", "server": "188.114.98.0", "server_port": 2053, "uuid": "d975f9d5-d0eb-4e71-b016-4b78531bbe57",
+				"transport": {"type": "ws", "headers": {"host": ["n1t.uppc.site"]}, "path": "/qlb4hqR5wd5g6WYb"},
+				"tls": {"enabled": true, "server_name": "n1t.uppc.site"}},
+			{"type": "trojan", "tag": "amin trojan httpupgrade tls", "server": "chatgpt.com", "server_port": 2087, "password": "us9w5pass",
+				"transport": {"type": "httpupgrade", "host": "n1t.uppc.site", "path": "/catd-hux"},
+				"tls": {"enabled": true, "server_name": "n1t.uppc.site"}},
+			{"type": "vless", "tag": "amin IR vless tcp", "server": "nir.uppc.site", "server_port": 56309, "uuid": "6a8ec418-1166-4f8d-b780-ed15f8411c13"}
+		],
+		"route": {"final": "proxy"},
+		"endpoints": []
+	}`
+
+	nodes, err := Parse([]byte(config), "auto")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(nodes) != 4 {
+		t.Fatalf("node count = %d, want 4 (selector/urltest/direct skipped)", len(nodes))
+	}
+
+	ss := nodes[0]
+	if ss.Type != "shadowsocks" || ss.Server != "n1.uppc.site" || ss.Port != 1080 || ss.Method != "chacha20-ietf-poly1305" || ss.Password != "GK_pass" {
+		t.Fatalf("shadowsocks node = %#v", ss)
+	}
+
+	vmess := nodes[1]
+	if vmess.Type != "vmess" || vmess.Transport != "ws" || vmess.Path != "/qlb4hqR5wd5g6WYb" || vmess.Host != "n1t.uppc.site" {
+		t.Fatalf("vmess transport = %#v", vmess)
+	}
+	if !vmess.TLS || vmess.SNI != "n1t.uppc.site" {
+		t.Fatalf("vmess tls = %#v", vmess)
+	}
+
+	trojan := nodes[2]
+	if trojan.Type != "trojan" || trojan.Transport != "httpupgrade" || trojan.Host != "n1t.uppc.site" || trojan.Path != "/catd-hux" {
+		t.Fatalf("trojan transport = %#v", trojan)
+	}
+
+	vless := nodes[3]
+	if vless.Type != "vless" || vless.Port != 56309 || vless.UUID != "6a8ec418-1166-4f8d-b780-ed15f8411c13" {
+		t.Fatalf("vless node = %#v", vless)
+	}
+}
+
+func TestParseSingBoxJSONConfigBase64(t *testing.T) {
+	config := `{"outbounds":[{"type":"shadowsocks","tag":"ss","server":"ss.example.com","server_port":8388,"method":"aes-128-gcm","password":"pass"}]}`
+	encoded := base64.StdEncoding.EncodeToString([]byte(config))
+
+	nodes, err := Parse([]byte(encoded), "auto")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Type != "shadowsocks" || nodes[0].Server != "ss.example.com" {
+		t.Fatalf("nodes = %#v", nodes)
+	}
+}
+
 func TestAssignSourceCreatesDeterministicIDs(t *testing.T) {
 	nodes, err := Parse([]byte("trojan://secret@example.org:443#Trojan"), "plain")
 	if err != nil {

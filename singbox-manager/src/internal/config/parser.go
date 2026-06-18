@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,6 +16,17 @@ type section struct {
 }
 
 func Load(path string) (*Config, error) {
+	cfg, err := LoadUnvalidated(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := Validate(*cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func LoadUnvalidated(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -29,9 +39,6 @@ func Load(path string) (*Config, error) {
 
 	cfg := DefaultConfig()
 	if err := applySections(&cfg, sections); err != nil {
-		return nil, err
-	}
-	if err := Validate(cfg); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
@@ -198,51 +205,30 @@ func applySections(cfg *Config, sections []section) error {
 				return err
 			}
 			cfg.Nodes[node.ID] = node
-		case "routing_profile":
-			profile, err := readRoutingProfile(sec)
-			if err != nil {
-				return err
-			}
-			cfg.Routing[profile.ID] = profile
-		case "dns_profile":
-			profile, err := readDNSProfile(sec)
-			if err != nil {
-				return err
-			}
-			cfg.DNSProfiles[profile.ID] = profile
 		case "dns_server":
 			server, err := readDNSServer(sec)
 			if err != nil {
 				return err
 			}
 			cfg.DNSServers[server.ID] = server
+		case "dns_rule":
+			rule, err := readDNSRule(sec)
+			if err != nil {
+				return err
+			}
+			cfg.DNSRules[rule.ID] = rule
+		case "route_rule":
+			rule, err := readRouteRule(sec)
+			if err != nil {
+				return err
+			}
+			cfg.RouteRules[rule.ID] = rule
 		case "ruleset":
 			ruleset, err := readRuleSet(sec)
 			if err != nil {
 				return err
 			}
 			cfg.RuleSets[ruleset.ID] = ruleset
-		case "source_rule":
-			rule, err := readSourceRule(sec)
-			if err != nil {
-				return err
-			}
-			cfg.SourceRules[rule.ID] = rule
-		case "pac":
-			if sec.name != "main" && sec.name != "pac" {
-				return fmt.Errorf("line %d: unsupported pac section %q", sec.line, sec.name)
-			}
-			pac, err := readPAC(sec)
-			if err != nil {
-				return err
-			}
-			cfg.PAC = pac
-		case "pac_custom":
-			pac, err := readCustomPAC(sec)
-			if err != nil {
-				return err
-			}
-			cfg.CustomPACs[pac.ID] = pac
 		case "tproxy":
 			if sec.name != "main" && sec.name != "tproxy" {
 				return fmt.Errorf("line %d: unsupported tproxy section %q", sec.line, sec.name)
@@ -272,7 +258,7 @@ func applySections(cfg *Config, sections []section) error {
 func applyManager(cfg *Config, sec section) error {
 	allowed := map[string]bool{
 		"enabled": true, "log_level": true, "active_group": true, "runtime_mode": true,
-		"sing_box_bin": true, "socket_path": true, "api_listen": true, "pac_listen": true,
+		"sing_box_bin": true, "socket_path": true, "api_listen": true,
 		"mixed_listen": true, "mixed_port": true, "tproxy_port": true, "dns_port": true,
 		"update_interval": true,
 	}
@@ -300,8 +286,6 @@ func applyManager(cfg *Config, sec section) error {
 			cfg.Manager.SocketPath = value
 		case "api_listen":
 			cfg.Manager.APIListen = value
-		case "pac_listen":
-			cfg.Manager.PACListen = value
 		case "mixed_listen":
 			cfg.Manager.MixedListen = value
 		case "mixed_port":
@@ -322,7 +306,7 @@ func applyManager(cfg *Config, sec section) error {
 
 func readGroup(sec section) (Group, error) {
 	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "name": true, "routing_profile": true, "dns_profile": true,
+		"enabled": true, "name": true, "route_final": true, "dns_final": true,
 		"strategy": true, "selected_node": true,
 		"health": true, "latency_ms": true, "last_check": true,
 	}); err != nil {
@@ -333,16 +317,16 @@ func readGroup(sec section) (Group, error) {
 	}
 
 	group := Group{
-		ID:             sec.name,
-		Enabled:        true,
-		Name:           sec.name,
-		Subscriptions:  cleanList(sec.lists["subscription"]),
-		RoutingProfile: sec.options["routing_profile"],
-		DNSProfile:     sec.options["dns_profile"],
-		Strategy:       valueOrDefault(sec.options["strategy"], "manual"),
-		SelectedNode:   sec.options["selected_node"],
-		Health:         valueOrDefault(sec.options["health"], "unknown"),
-		LastCheck:      sec.options["last_check"],
+		ID:            sec.name,
+		Enabled:       true,
+		Name:          sec.name,
+		Subscriptions: cleanList(sec.lists["subscription"]),
+		Strategy:      valueOrDefault(sec.options["strategy"], "manual"),
+		SelectedNode:  sec.options["selected_node"],
+		RouteFinal:    valueOrDefault(sec.options["route_final"], "proxy"),
+		DNSFinal:      sec.options["dns_final"],
+		Health:        valueOrDefault(sec.options["health"], "unknown"),
+		LastCheck:     sec.options["last_check"],
 	}
 	if value, ok := sec.options["latency_ms"]; ok {
 		latency, err := parseNonNegativeInt(sec, "latency_ms", value)
@@ -490,74 +474,6 @@ func readNode(sec section) (Node, error) {
 	return node, nil
 }
 
-func readRoutingProfile(sec section) (RoutingProfile, error) {
-	if sec.name == "" {
-		return RoutingProfile{}, fmt.Errorf("line %d: routing_profile section requires a name", sec.line)
-	}
-	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "name": true, "mode": true, "final": true,
-	}); err != nil {
-		return RoutingProfile{}, err
-	}
-	if err := rejectUnknownLists(sec, map[string]bool{"ruleset": true}); err != nil {
-		return RoutingProfile{}, err
-	}
-
-	profile := RoutingProfile{
-		ID:       sec.name,
-		Enabled:  true,
-		Name:     valueOrDefault(sec.options["name"], sec.name),
-		Mode:     valueOrDefault(sec.options["mode"], "rule"),
-		RuleSets: cleanList(sec.lists["ruleset"]),
-		Final:    valueOrDefault(sec.options["final"], "proxy"),
-	}
-	if value, ok := sec.options["enabled"]; ok {
-		enabled, err := parseBool(sec, "enabled", value)
-		if err != nil {
-			return RoutingProfile{}, err
-		}
-		profile.Enabled = enabled
-	}
-	return profile, nil
-}
-
-func readDNSProfile(sec section) (DNSProfile, error) {
-	if sec.name == "" {
-		return DNSProfile{}, fmt.Errorf("line %d: dns_profile section requires a name", sec.line)
-	}
-	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "name": true, "mode": true, "hijack": true,
-	}); err != nil {
-		return DNSProfile{}, err
-	}
-	if err := rejectUnknownLists(sec, map[string]bool{"server": true}); err != nil {
-		return DNSProfile{}, err
-	}
-
-	profile := DNSProfile{
-		ID:      sec.name,
-		Enabled: true,
-		Name:    valueOrDefault(sec.options["name"], sec.name),
-		Mode:    valueOrDefault(sec.options["mode"], "direct"),
-		Servers: cleanList(sec.lists["server"]),
-		Hijack:  false,
-	}
-	var err error
-	if value, ok := sec.options["enabled"]; ok {
-		profile.Enabled, err = parseBool(sec, "enabled", value)
-		if err != nil {
-			return DNSProfile{}, err
-		}
-	}
-	if value, ok := sec.options["hijack"]; ok {
-		profile.Hijack, err = parseBool(sec, "hijack", value)
-		if err != nil {
-			return DNSProfile{}, err
-		}
-	}
-	return profile, nil
-}
-
 func readDNSServer(sec section) (DNSServer, error) {
 	if sec.name == "" {
 		return DNSServer{}, fmt.Errorf("line %d: dns_server section requires a name", sec.line)
@@ -626,108 +542,68 @@ func readRuleSet(sec section) (RuleSet, error) {
 	return ruleset, nil
 }
 
-func readSourceRule(sec section) (SourceRule, error) {
+func readDNSRule(sec section) (DNSRule, error) {
 	if sec.name == "" {
-		return SourceRule{}, fmt.Errorf("line %d: source_rule section requires a name", sec.line)
+		return DNSRule{}, fmt.Errorf("line %d: dns_rule section requires a name", sec.line)
 	}
 	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "name": true, "profile": true, "outbound": true,
+		"enabled": true, "name": true, "group": true, "server": true,
 	}); err != nil {
-		return SourceRule{}, err
+		return DNSRule{}, err
 	}
-	if err := rejectUnknownLists(sec, map[string]bool{"source_ip": true}); err != nil {
-		return SourceRule{}, err
+	if err := rejectUnknownLists(sec, map[string]bool{"source_ip": true, "ruleset": true}); err != nil {
+		return DNSRule{}, err
 	}
 
-	rule := SourceRule{
+	rule := DNSRule{
 		ID:       sec.name,
 		Enabled:  true,
 		Name:     valueOrDefault(sec.options["name"], sec.name),
-		Profile:  sec.options["profile"],
+		Group:    sec.options["group"],
 		Sources:  cleanList(sec.lists["source_ip"]),
-		Outbound: valueOrDefault(sec.options["outbound"], "proxy"),
+		RuleSets: cleanList(sec.lists["ruleset"]),
+		Server:   sec.options["server"],
 	}
 	if value, ok := sec.options["enabled"]; ok {
 		enabled, err := parseBool(sec, "enabled", value)
 		if err != nil {
-			return SourceRule{}, err
+			return DNSRule{}, err
 		}
 		rule.Enabled = enabled
 	}
 	return rule, nil
 }
 
-func readPAC(sec section) (PAC, error) {
-	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "source": true, "selected_custom": true, "local_bypass": true,
-	}); err != nil {
-		return PAC{}, err
-	}
-	if err := rejectUnknownLists(sec, map[string]bool{
-		"custom_rule": true, "whitelist": true, "blacklist": true,
-	}); err != nil {
-		return PAC{}, err
-	}
-
-	pac := PAC{
-		Enabled:        false,
-		Source:         valueOrDefault(sec.options["source"], "generated"),
-		SelectedCustom: sec.options["selected_custom"],
-		LocalBypass:    true,
-		CustomRules:    cleanList(sec.lists["custom_rule"]),
-		Whitelist:      cleanList(sec.lists["whitelist"]),
-		Blacklist:      cleanList(sec.lists["blacklist"]),
-	}
-	var err error
-	if value, ok := sec.options["enabled"]; ok {
-		pac.Enabled, err = parseBool(sec, "enabled", value)
-		if err != nil {
-			return PAC{}, err
-		}
-	}
-	if value, ok := sec.options["local_bypass"]; ok {
-		pac.LocalBypass, err = parseBool(sec, "local_bypass", value)
-		if err != nil {
-			return PAC{}, err
-		}
-	}
-	return pac, nil
-}
-
-func readCustomPAC(sec section) (CustomPAC, error) {
+func readRouteRule(sec section) (RouteRule, error) {
 	if sec.name == "" {
-		return CustomPAC{}, fmt.Errorf("line %d: pac_custom section requires a name", sec.line)
+		return RouteRule{}, fmt.Errorf("line %d: route_rule section requires a name", sec.line)
 	}
 	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "name": true, "content": true, "content_base64": true,
+		"enabled": true, "name": true, "group": true, "outbound": true,
 	}); err != nil {
-		return CustomPAC{}, err
+		return RouteRule{}, err
 	}
-	if err := rejectUnknownLists(sec, nil); err != nil {
-		return CustomPAC{}, err
+	if err := rejectUnknownLists(sec, map[string]bool{"source_ip": true, "ruleset": true}); err != nil {
+		return RouteRule{}, err
 	}
 
-	pac := CustomPAC{
-		ID:      sec.name,
-		Enabled: true,
-		Name:    valueOrDefault(sec.options["name"], sec.name),
-		Content: sec.options["content"],
-	}
-	if encoded := sec.options["content_base64"]; encoded != "" {
-		decoded, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil {
-			return CustomPAC{}, fmt.Errorf("line %d: option content_base64 is invalid", sec.line)
-		}
-		pac.Content = string(decoded)
+	rule := RouteRule{
+		ID:       sec.name,
+		Enabled:  true,
+		Name:     valueOrDefault(sec.options["name"], sec.name),
+		Group:    sec.options["group"],
+		Sources:  cleanList(sec.lists["source_ip"]),
+		RuleSets: cleanList(sec.lists["ruleset"]),
+		Outbound: valueOrDefault(sec.options["outbound"], "proxy"),
 	}
 	if value, ok := sec.options["enabled"]; ok {
 		enabled, err := parseBool(sec, "enabled", value)
 		if err != nil {
-			return CustomPAC{}, err
+			return RouteRule{}, err
 		}
-		pac.Enabled = enabled
+		rule.Enabled = enabled
 	}
-	return pac, nil
+	return rule, nil
 }
 
 func readTProxy(sec section) (TProxy, error) {

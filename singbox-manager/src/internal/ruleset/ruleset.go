@@ -25,7 +25,12 @@ type Result struct {
 	Bytes int64  `json:"bytes"`
 }
 
-func Download(ctx context.Context, ruleset managerconfig.RuleSet) (Result, error) {
+// Download fetches a remote rule-set and writes it to its cache path. When
+// proxyAddr is non-empty (e.g. "127.0.0.1:2080", the local sing-box mixed
+// inbound) the request is routed through it. Rule-set hosts are commonly
+// censored on the networks this runs on, so downloading through the running
+// tunnel is what makes a manual refresh succeed.
+func Download(ctx context.Context, ruleset managerconfig.RuleSet, proxyAddr string) (Result, error) {
 	if !ruleset.Enabled {
 		return Result{}, fmt.Errorf("ruleset %q is disabled", ruleset.ID)
 	}
@@ -50,7 +55,7 @@ func Download(ctx context.Context, ruleset managerconfig.RuleSet) (Result, error
 	if err != nil {
 		return Result{}, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := newClient(proxyAddr).Do(req)
 	if err != nil {
 		return Result{}, err
 	}
@@ -93,6 +98,19 @@ func Download(ctx context.Context, ruleset managerconfig.RuleSet) (Result, error
 		return Result{}, err
 	}
 	return Result{ID: ruleset.ID, Path: path, Bytes: written}, nil
+}
+
+// newClient returns an HTTP client that routes through proxyAddr (host:port)
+// when set, otherwise a direct client. The local mixed inbound speaks HTTP
+// CONNECT, so an http_proxy URL is sufficient for both http and https targets.
+func newClient(proxyAddr string) *http.Client {
+	if strings.TrimSpace(proxyAddr) == "" {
+		return http.DefaultClient
+	}
+	proxyURL := &url.URL{Scheme: "http", Host: proxyAddr}
+	return &http.Client{
+		Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)},
+	}
 }
 
 func Path(ruleset managerconfig.RuleSet) string {

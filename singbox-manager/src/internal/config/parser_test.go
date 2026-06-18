@@ -18,24 +18,34 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
-	option routing_profile 'routes'
-	option dns_profile 'dns'
+	option route_final 'proxy'
+	option dns_final 'udp'
 	list subscription 'sub'
 
 config subscription 'sub'
 	option enabled '0'
 	option format 'auto'
 
-config routing_profile 'routes'
-	list ruleset 'local'
-	option final 'proxy'
-
-config source_rule 'phone'
+config route_rule 'phone'
 	option enabled '1'
 	option name 'Phone'
-	option profile 'routes'
+	option group 'home'
 	list source_ip '192.168.1.20'
 	option outbound 'direct'
+
+config route_rule 'iran'
+	option enabled '1'
+	option name 'Iran'
+	option group 'home'
+	list ruleset 'local'
+	option outbound 'direct'
+
+config dns_rule 'phone_dns'
+	option enabled '1'
+	option name 'Phone DNS'
+	option group 'home'
+	list source_ip '192.168.1.20'
+	option server 'udp'
 
 config ruleset 'local'
 	option type 'local'
@@ -43,26 +53,9 @@ config ruleset 'local'
 	option path '/tmp/local.srs'
 	option last_update '2026-06-02T12:00:00Z'
 
-config dns_profile 'dns'
-	list server 'udp'
-
 config dns_server 'udp'
 	option type 'udp'
 	option address '223.5.5.5'
-
-config pac 'pac'
-	option enabled '1'
-	option source 'custom'
-	option selected_custom 'office'
-	option local_bypass '1'
-	list whitelist '.lan'
-	list blacklist '.blocked.example'
-	list custom_rule 'direct intranet.example'
-
-config pac_custom 'office'
-	option enabled '1'
-	option name 'Office'
-	option content 'function FindProxyForURL(url, host) { return "DIRECT"; }'
 
 config tproxy 'tproxy'
 	option enabled '0'
@@ -86,20 +79,23 @@ config tun 'tun'
 	if cfg.Groups["home"].Subscriptions[0] != "sub" {
 		t.Fatalf("subscription ref = %q, want sub", cfg.Groups["home"].Subscriptions[0])
 	}
+	if cfg.Groups["home"].DNSFinal != "udp" {
+		t.Fatalf("group dns_final = %q, want udp", cfg.Groups["home"].DNSFinal)
+	}
 	if cfg.DNSServers["udp"].Address != "223.5.5.5" {
 		t.Fatalf("dns address = %q, want 223.5.5.5", cfg.DNSServers["udp"].Address)
 	}
 	if cfg.RuleSets["local"].LastUpdate != "2026-06-02T12:00:00Z" {
 		t.Fatalf("ruleset last_update = %q", cfg.RuleSets["local"].LastUpdate)
 	}
-	if cfg.SourceRules["phone"].Sources[0] != "192.168.1.20" || cfg.SourceRules["phone"].Outbound != "direct" {
-		t.Fatalf("source rule = %#v", cfg.SourceRules["phone"])
+	if cfg.RouteRules["phone"].Sources[0] != "192.168.1.20" || cfg.RouteRules["phone"].Outbound != "direct" {
+		t.Fatalf("route rule = %#v", cfg.RouteRules["phone"])
 	}
-	if !cfg.PAC.Enabled || cfg.PAC.Source != "custom" || cfg.PAC.SelectedCustom != "office" || cfg.PAC.Whitelist[0] != ".lan" || cfg.PAC.Blacklist[0] != ".blocked.example" {
-		t.Fatalf("PAC = %#v", cfg.PAC)
+	if cfg.RouteRules["iran"].RuleSets[0] != "local" {
+		t.Fatalf("route rule ruleset = %#v", cfg.RouteRules["iran"].RuleSets)
 	}
-	if cfg.CustomPACs["office"].Content == "" {
-		t.Fatal("expected custom PAC content")
+	if cfg.DNSRules["phone_dns"].Server != "udp" {
+		t.Fatalf("dns rule server = %q, want udp", cfg.DNSRules["phone_dns"].Server)
 	}
 	if !cfg.TProxy.KillSwitch {
 		t.Fatal("expected tproxy kill switch")
@@ -118,14 +114,8 @@ func TestLoadPackageDefaultConfig(t *testing.T) {
 	if cfg.Manager.MixedListen != "0.0.0.0" {
 		t.Fatalf("mixed listen = %q, want 0.0.0.0", cfg.Manager.MixedListen)
 	}
-	if cfg.ActiveDNSProfile() == nil {
-		t.Fatal("expected active DNS profile")
-	}
-	if _, ok := cfg.Routing["china_direct"]; !ok {
-		t.Fatal("expected built-in China Direct routing profile")
-	}
-	if _, ok := cfg.Routing["russia_direct"]; !ok {
-		t.Fatal("expected built-in Russia Direct routing profile")
+	if _, ok := cfg.Groups["home"]; !ok {
+		t.Fatal("expected built-in home group")
 	}
 	if cfg.RuleSets["geoip-ir"].URL == "" {
 		t.Fatal("expected built-in Iran ruleset URL")
@@ -141,9 +131,6 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
-
-config pac 'pac'
-	option enabled '0'
 
 config tproxy 'tproxy'
 	option enabled '0'
@@ -224,6 +211,36 @@ config group 'home'
 	}
 }
 
+func TestSetManagerRuntimeModeUpdatesMainSection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "singbox-manager")
+	data := `
+config manager 'main'
+	option active_group 'home'
+	option runtime_mode 'rule'
+
+config group 'home'
+	option name 'Home'
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if err := SetManagerRuntimeMode(path, "global"); err != nil {
+		t.Fatalf("set runtime mode: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load updated config: %v", err)
+	}
+	if cfg.Manager.RuntimeMode != "global" {
+		t.Fatalf("runtime mode = %q, want global", cfg.Manager.RuntimeMode)
+	}
+	if err := SetManagerRuntimeMode(path, "bogus"); err == nil {
+		t.Fatal("expected invalid runtime mode error")
+	}
+}
+
 func TestLoadRejectsMalformedUCI(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "singbox-manager")
@@ -246,7 +263,7 @@ config manager 'main'
 
 func TestValidateRejectsTProxyAndTUNConflict(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual"}
+	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
 	cfg.TProxy.Enabled = true
 	cfg.TUN.Enabled = true
 
@@ -259,39 +276,87 @@ func TestValidateRejectsTProxyAndTUNConflict(t *testing.T) {
 	}
 }
 
-func TestValidateAcceptsDNSOnlySourceRule(t *testing.T) {
+func TestValidateAcceptsRouteAndDNSRules(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Groups["home"] = Group{
-		ID:             "home",
-		Enabled:        true,
-		Name:           "Home",
-		RoutingProfile: "routes",
-		Strategy:       "manual",
+		ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy", DNSFinal: "udp",
 	}
-	cfg.Routing["routes"] = RoutingProfile{
-		ID:      "routes",
-		Enabled: true,
-		Name:    "Routes",
-		Mode:    "rule",
-		Final:   "proxy",
-	}
-	cfg.SourceRules["phone_dns"] = SourceRule{
-		ID:       "phone_dns",
-		Enabled:  true,
-		Name:     "Phone DNS",
-		Profile:  "routes",
-		Sources:  []string{"192.168.1.20"},
-		Outbound: "dns",
-	}
+	cfg.DNSServers["udp"] = DNSServer{ID: "udp", Enabled: true, Name: "UDP", Type: "udp", Address: "1.1.1.1"}
+	cfg.RuleSets["geoip-ir"] = RuleSet{ID: "geoip-ir", Enabled: true, Name: "GeoIP", Type: "remote", Format: "binary", URL: "https://example.com/geoip-ir.srs"}
+	cfg.RouteRules["dev"] = RouteRule{ID: "dev", Enabled: true, Name: "Device", Group: "home", Sources: []string{"192.168.1.20"}, RuleSets: []string{"geoip-ir"}, Outbound: "direct"}
+	cfg.DNSRules["dev_dns"] = DNSRule{ID: "dev_dns", Enabled: true, Name: "Device DNS", Group: "home", Sources: []string{"192.168.1.20"}, Server: "udp"}
 
 	if err := Validate(cfg); err != nil {
-		t.Fatalf("validate DNS-only source rule: %v", err)
+		t.Fatalf("validate route and dns rules: %v", err)
+	}
+}
+
+func TestValidateRejectsRuleWithMissingReferences(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
+	cfg.RouteRules["bad"] = RouteRule{ID: "bad", Enabled: true, Name: "Bad", Group: "missing", Sources: []string{"192.168.1.20"}, Outbound: "direct"}
+	cfg.DNSRules["bad_dns"] = DNSRule{ID: "bad_dns", Enabled: true, Name: "Bad DNS", Group: "home", Sources: []string{"192.168.1.20"}, Server: "missing"}
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	for _, want := range []string{
+		"route_rule.bad.group references missing group",
+		"dns_rule.bad_dns.server references missing dns_server",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err, want)
+		}
+	}
+}
+
+func TestLoadUnvalidatedReturnsInvalidRows(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "singbox-manager")
+	data := `
+config manager 'main'
+	option active_group 'home'
+
+config group 'home'
+	option name 'Home'
+
+config route_rule 'device_124'
+	option enabled '1'
+	option name 'Device'
+	option group 'home'
+	list source_ip '192.168.200.124'
+	option outbound 'direct'
+
+config dns_rule 'device_124_dns'
+	option enabled '1'
+	option name 'Device DNS'
+	option group 'home'
+	list source_ip '192.168.200.124'
+	option server 'missing'
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected validated load to fail")
+	}
+	cfg, err := LoadUnvalidated(path)
+	if err != nil {
+		t.Fatalf("load unvalidated config: %v", err)
+	}
+	if _, ok := cfg.RouteRules["device_124"]; !ok {
+		t.Fatal("expected route rule to remain visible")
+	}
+	if _, ok := cfg.DNSRules["device_124_dns"]; !ok {
+		t.Fatal("expected invalid dns rule to remain visible")
 	}
 }
 
 func TestValidateRejectsInvalidTProxyFilters(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual"}
+	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
 	cfg.TProxy.Enabled = true
 	cfg.TProxy.IncludeSubnet = []string{"not-a-cidr"}
 	cfg.TProxy.ExcludeSubnet = []string{"192.168.1.1"}
@@ -315,7 +380,7 @@ func TestValidateRejectsInvalidTProxyFilters(t *testing.T) {
 
 func TestValidateRejectsInvalidTUNAddresses(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual"}
+	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
 	cfg.TUN.Inet4Address = "fdfe:dcba:9876::1/126"
 	cfg.TUN.Inet6Address = "172.19.0.1/30"
 
@@ -392,52 +457,6 @@ config node 'manual'
 	}
 	if cfg.Subscriptions["sub"].Health != "ok" {
 		t.Fatalf("subscription health = %q, want ok", cfg.Subscriptions["sub"].Health)
-	}
-}
-
-func TestSubscriptionRefreshErrorIsSeparateFromHealth(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "singbox-manager")
-	data := `
-config manager 'main'
-	option active_group 'home'
-
-config group 'home'
-	option name 'Home'
-
-config subscription 'sub'
-	option enabled '1'
-	option url 'https://example.com/sub'
-	option health 'ok'
-	option last_error 'old'
-`
-	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	if err := MarkSubscriptionError(path, "sub", "fetch failed\nwith details"); err != nil {
-		t.Fatalf("mark subscription error: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("load failed config: %v", err)
-	}
-	if cfg.Subscriptions["sub"].Health != "ok" {
-		t.Fatalf("subscription health = %q, want ok", cfg.Subscriptions["sub"].Health)
-	}
-	if cfg.Subscriptions["sub"].LastError != "fetch failed" {
-		t.Fatalf("subscription last_error = %q, want fetch failed", cfg.Subscriptions["sub"].LastError)
-	}
-
-	if err := ReplaceSubscriptionNodes(path, "sub", []Node{{ID: "node", Enabled: true, Type: "direct", Subscription: "sub"}}); err != nil {
-		t.Fatalf("replace subscription nodes: %v", err)
-	}
-	cfg, err = Load(path)
-	if err != nil {
-		t.Fatalf("load refreshed config: %v", err)
-	}
-	if cfg.Subscriptions["sub"].LastError != "" {
-		t.Fatalf("subscription last_error = %q, want empty", cfg.Subscriptions["sub"].LastError)
 	}
 }
 
@@ -527,7 +546,7 @@ config node 'manual'
 	}
 }
 
-func TestDNSCRUDCleansReferences(t *testing.T) {
+func TestDeleteDNSServerCleansRulesAndFinal(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "singbox-manager")
 	data := `
@@ -536,26 +555,26 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
-	option dns_profile 'dns'
-
-config dns_profile 'dns'
-	option name 'DNS'
-	list server 'udp'
+	option dns_final 'udp'
 
 config dns_server 'udp'
 	option type 'udp'
 	option address '1.1.1.1'
+
+config dns_server 'doh'
+	option type 'doh'
+	option address 'https://dns.example/dns-query'
+	option detour 'proxy'
+
+config dns_rule 'phone'
+	option group 'home'
+	list source_ip '192.168.1.20'
+	option server 'udp'
 `
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := UpsertDNSServer(path, DNSServer{ID: "doh", Enabled: true, Name: "DoH", Type: "doh", Address: "https://dns.example/dns-query", Detour: "proxy"}); err != nil {
-		t.Fatalf("upsert dns server: %v", err)
-	}
-	if err := UpsertDNSProfile(path, DNSProfile{ID: "dns", Enabled: true, Name: "DNS", Mode: "split", Servers: []string{"udp", "doh"}, Hijack: true}); err != nil {
-		t.Fatalf("upsert dns profile: %v", err)
-	}
 	if err := DeleteDNSServer(path, "udp"); err != nil {
 		t.Fatalf("delete dns server: %v", err)
 	}
@@ -567,26 +586,15 @@ config dns_server 'udp'
 	if _, ok := cfg.DNSServers["udp"]; ok {
 		t.Fatal("dns server still exists")
 	}
-	if len(cfg.DNSProfiles["dns"].Servers) != 1 || cfg.DNSProfiles["dns"].Servers[0] != "doh" {
-		t.Fatalf("dns profile servers = %#v, want doh", cfg.DNSProfiles["dns"].Servers)
+	if _, ok := cfg.DNSRules["phone"]; ok {
+		t.Fatal("dependent dns rule should be removed")
 	}
-
-	if err := DeleteDNSProfile(path, "dns"); err != nil {
-		t.Fatalf("delete dns profile: %v", err)
-	}
-	cfg, err = Load(path)
-	if err != nil {
-		t.Fatalf("load after profile delete: %v", err)
-	}
-	if _, ok := cfg.DNSProfiles["dns"]; ok {
-		t.Fatal("dns profile still exists")
-	}
-	if cfg.Groups["home"].DNSProfile != "" {
-		t.Fatalf("group dns profile = %q, want empty", cfg.Groups["home"].DNSProfile)
+	if cfg.Groups["home"].DNSFinal != "" {
+		t.Fatalf("group dns_final = %q, want empty", cfg.Groups["home"].DNSFinal)
 	}
 }
 
-func TestRuleSetCRUDCleansRoutingReferences(t *testing.T) {
+func TestRuleSetCRUDCleansRuleReferences(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "singbox-manager")
 	data := `
@@ -595,11 +603,11 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
-	option routing_profile 'routes'
 
-config routing_profile 'routes'
+config route_rule 'iran'
+	option group 'home'
 	list ruleset 'geoip-ir'
-	option final 'proxy'
+	option outbound 'direct'
 
 config ruleset 'geoip_ir'
 	option id 'geoip-ir'
@@ -637,12 +645,13 @@ config ruleset 'geoip_ir'
 	if _, ok := cfg.RuleSets["geoip-ir"]; ok {
 		t.Fatal("ruleset still exists")
 	}
-	if len(cfg.Routing["routes"].RuleSets) != 0 {
-		t.Fatalf("routing rulesets = %#v, want empty", cfg.Routing["routes"].RuleSets)
+	// The route rule only matched the deleted ruleset, so it is dropped too.
+	if _, ok := cfg.RouteRules["iran"]; ok {
+		t.Fatal("matcher-less route rule should be removed")
 	}
 }
 
-func TestRoutingProfileCRUDCleansGroupReferences(t *testing.T) {
+func TestRouteRuleCRUD(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "singbox-manager")
 	data := `
@@ -651,51 +660,87 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
-	option routing_profile 'routes'
-
-config ruleset 'geoip_ir'
-	option id 'geoip-ir'
-	option enabled '1'
-	option type 'remote'
-	option format 'srs'
-	option url 'https://example.com/geoip-ir.srs'
-
-config routing_profile 'routes'
-	option enabled '1'
-	option name 'Routes'
-	option mode 'rule'
-	list ruleset 'geoip-ir'
-	option final 'proxy'
 `
 	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if err := UpsertRoutingProfile(path, RoutingProfile{ID: "routes", Enabled: true, Name: "Updated Routes", Mode: "rule", RuleSets: []string{"geoip-ir"}, Final: "direct"}); err != nil {
-		t.Fatalf("upsert routing profile: %v", err)
+	if err := UpsertRouteRule(path, RouteRule{ID: "dev", Enabled: true, Name: "Device", Group: "home", Sources: []string{"192.168.1.20"}, Outbound: "direct"}); err != nil {
+		t.Fatalf("upsert route rule: %v", err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("load updated config: %v", err)
 	}
-	if cfg.Routing["routes"].Name != "Updated Routes" {
-		t.Fatalf("routing profile name = %q", cfg.Routing["routes"].Name)
-	}
-	if cfg.Routing["routes"].Final != "direct" {
-		t.Fatalf("routing profile final = %q", cfg.Routing["routes"].Final)
+	if cfg.RouteRules["dev"].Outbound != "direct" || cfg.RouteRules["dev"].Sources[0] != "192.168.1.20" {
+		t.Fatalf("route rule = %#v", cfg.RouteRules["dev"])
 	}
 
-	if err := DeleteRoutingProfile(path, "routes"); err != nil {
-		t.Fatalf("delete routing profile: %v", err)
+	if err := UpsertRouteRule(path, RouteRule{ID: "dev", Enabled: true, Name: "Device", Group: "home", Sources: []string{"192.168.1.30"}, Outbound: "proxy"}); err != nil {
+		t.Fatalf("update route rule: %v", err)
 	}
-	cfg, err = Load(path)
+	cfg, _ = Load(path)
+	if cfg.RouteRules["dev"].Outbound != "proxy" || cfg.RouteRules["dev"].Sources[0] != "192.168.1.30" {
+		t.Fatalf("updated route rule = %#v", cfg.RouteRules["dev"])
+	}
+
+	if err := DeleteRouteRule(path, "dev"); err != nil {
+		t.Fatalf("delete route rule: %v", err)
+	}
+	cfg, _ = Load(path)
+	if _, ok := cfg.RouteRules["dev"]; ok {
+		t.Fatal("route rule still exists")
+	}
+}
+
+func TestSetGroupSettingsUpdatesGroup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "singbox-manager")
+	data := `
+config manager 'main'
+	option active_group 'home'
+
+config group 'home'
+	option name 'Home'
+	option strategy 'manual'
+	option route_final 'proxy'
+	option health 'ok'
+
+config dns_server 'udp'
+	option type 'udp'
+	option address '1.1.1.1'
+
+config subscription 'sub'
+	option enabled '1'
+	option url 'https://example.com/sub'
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := SetGroupSettings(path, Group{
+		ID:            "home",
+		Name:          "Home Net",
+		Strategy:      "urltest",
+		RouteFinal:    "direct",
+		DNSFinal:      "udp",
+		Subscriptions: []string{"sub"},
+	})
 	if err != nil {
-		t.Fatalf("load after routing profile delete: %v", err)
+		t.Fatalf("set group settings: %v", err)
 	}
-	if _, ok := cfg.Routing["routes"]; ok {
-		t.Fatal("routing profile still exists")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load updated config: %v", err)
 	}
-	if cfg.Groups["home"].RoutingProfile != "" {
-		t.Fatalf("group routing_profile = %q, want empty", cfg.Groups["home"].RoutingProfile)
+	group := cfg.Groups["home"]
+	if group.Name != "Home Net" || group.Strategy != "urltest" || group.RouteFinal != "direct" || group.DNSFinal != "udp" {
+		t.Fatalf("group = %#v", group)
+	}
+	if len(group.Subscriptions) != 1 || group.Subscriptions[0] != "sub" {
+		t.Fatalf("group subscriptions = %#v, want sub", group.Subscriptions)
+	}
+	if group.Health != "ok" {
+		t.Fatalf("group health = %q, want preserved ok", group.Health)
 	}
 }

@@ -18,17 +18,9 @@
 			"path": "singbox-manager/dashboard"
 		}
 	},
-	"admin/services/singbox-manager/subscriptions": {
-		"title": "Subscriptions",
-		"order": 20,
-		"action": {
-			"type": "view",
-			"path": "singbox-manager/subscriptions"
-		}
-	},
 	"admin/services/singbox-manager/nodes": {
 		"title": "Nodes",
-		"order": 30,
+		"order": 20,
 		"action": {
 			"type": "view",
 			"path": "singbox-manager/nodes"
@@ -36,50 +28,26 @@
 	},
 	"admin/services/singbox-manager/dns": {
 		"title": "DNS",
-		"order": 40,
+		"order": 30,
 		"action": {
 			"type": "view",
 			"path": "singbox-manager/dns"
 		}
 	},
-	"admin/services/singbox-manager/rulesets": {
-		"title": "Rule Sets",
+	"admin/services/singbox-manager/routing": {
+		"title": "Routing",
+		"order": 40,
+		"action": {
+			"type": "view",
+			"path": "singbox-manager/routing"
+		}
+	},
+	"admin/services/singbox-manager/network": {
+		"title": "Network",
 		"order": 50,
 		"action": {
 			"type": "view",
-			"path": "singbox-manager/rulesets"
-		}
-	},
-	"admin/services/singbox-manager/pac": {
-		"title": "PAC",
-		"order": 60,
-		"action": {
-			"type": "view",
-			"path": "singbox-manager/pac"
-		}
-	},
-	"admin/services/singbox-manager/logs": {
-		"title": "Logs",
-		"order": 65,
-		"action": {
-			"type": "view",
-			"path": "singbox-manager/logs"
-		}
-	},
-	"admin/services/singbox-manager/tproxy": {
-		"title": "Transparent Proxy",
-		"order": 70,
-		"action": {
-			"type": "view",
-			"path": "singbox-manager/tproxy"
-		}
-	},
-	"admin/services/singbox-manager/tun": {
-		"title": "TUN",
-		"order": 80,
-		"action": {
-			"type": "view",
-			"path": "singbox-manager/tun"
+			"path": "singbox-manager/network"
 		}
 	}
 }

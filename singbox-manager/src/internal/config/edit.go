@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -253,6 +252,25 @@ func SetManagerEnabled(path string, enabled bool) error {
 	})
 }
 
+func SetManagerRuntimeMode(path string, mode string) error {
+	if !inSet(mode, "direct", "rule", "global") {
+		return fmt.Errorf("runtime mode must be direct, rule, or global, got %q", mode)
+	}
+	return editConfig(path, func(sections []section) ([]section, error) {
+		for i := range sections {
+			if sections[i].typ != "manager" || sections[i].name != "main" {
+				continue
+			}
+			if sections[i].options == nil {
+				sections[i].options = map[string]string{}
+			}
+			sections[i].options["runtime_mode"] = mode
+			return sections, nil
+		}
+		return nil, fmt.Errorf("manager main section not found")
+	})
+}
+
 func SelectNode(path string, groupID string, nodeID string) error {
 	if groupID == "" {
 		return fmt.Errorf("group id is required")
@@ -278,20 +296,17 @@ func SelectNode(path string, groupID string, nodeID string) error {
 	})
 }
 
-func UpsertDNSProfile(path string, profile DNSProfile) error {
-	if profile.ID == "" {
-		return fmt.Errorf("dns profile id is required")
+func UpsertDNSRule(path string, rule DNSRule) error {
+	if rule.ID == "" {
+		return fmt.Errorf("dns rule id is required")
 	}
-	if profile.Name == "" {
-		profile.Name = profile.ID
-	}
-	if profile.Mode == "" {
-		profile.Mode = "direct"
+	if rule.Name == "" {
+		rule.Name = rule.ID
 	}
 	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := dnsProfileSection(profile)
+		replacement := dnsRuleSection(rule)
 		for i, sec := range sections {
-			if sec.typ == "dns_profile" && sec.name == profile.ID {
+			if sec.typ == "dns_rule" && sec.name == rule.ID {
 				sections[i] = replacement
 				return sections, nil
 			}
@@ -300,25 +315,22 @@ func UpsertDNSProfile(path string, profile DNSProfile) error {
 	})
 }
 
-func DeleteDNSProfile(path string, profileID string) error {
-	if profileID == "" {
-		return fmt.Errorf("dns profile id is required")
+func DeleteDNSRule(path string, ruleID string) error {
+	if ruleID == "" {
+		return fmt.Errorf("dns rule id is required")
 	}
 	return editConfig(path, func(sections []section) ([]section, error) {
 		next := make([]section, 0, len(sections))
 		found := false
 		for _, sec := range sections {
-			if sec.typ == "dns_profile" && sec.name == profileID {
+			if sec.typ == "dns_rule" && sec.name == ruleID {
 				found = true
 				continue
-			}
-			if sec.typ == "group" && sec.options["dns_profile"] == profileID {
-				delete(sec.options, "dns_profile")
 			}
 			next = append(next, sec)
 		}
 		if !found {
-			return nil, fmt.Errorf("dns profile %q not found", profileID)
+			return nil, fmt.Errorf("dns rule %q not found", ruleID)
 		}
 		return next, nil
 	})
@@ -354,12 +366,14 @@ func DeleteDNSServer(path string, serverID string) error {
 		next := make([]section, 0, len(sections))
 		found := false
 		for _, sec := range sections {
-			if sec.typ == "dns_server" && sec.name == serverID {
+			switch {
+			case sec.typ == "dns_server" && sec.name == serverID:
 				found = true
 				continue
-			}
-			if sec.typ == "dns_profile" {
-				removeListValue(&sec, "server", serverID)
+			case sec.typ == "dns_rule" && sec.options["server"] == serverID:
+				continue
+			case sec.typ == "group" && sec.options["dns_final"] == serverID:
+				delete(sec.options, "dns_final")
 			}
 			next = append(next, sec)
 		}
@@ -370,61 +384,9 @@ func DeleteDNSServer(path string, serverID string) error {
 	})
 }
 
-func UpsertRoutingProfile(path string, profile RoutingProfile) error {
-	if profile.ID == "" {
-		return fmt.Errorf("routing profile id is required")
-	}
-	if profile.Name == "" {
-		profile.Name = profile.ID
-	}
-	if profile.Mode == "" {
-		profile.Mode = "rule"
-	}
-	if profile.Final == "" {
-		profile.Final = "proxy"
-	}
-	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := routingProfileSection(profile)
-		for i, sec := range sections {
-			if sec.typ == "routing_profile" && sec.name == profile.ID {
-				sections[i] = replacement
-				return sections, nil
-			}
-		}
-		return append(sections, replacement), nil
-	})
-}
-
-func DeleteRoutingProfile(path string, profileID string) error {
-	if profileID == "" {
-		return fmt.Errorf("routing profile id is required")
-	}
-	return editConfig(path, func(sections []section) ([]section, error) {
-		next := make([]section, 0, len(sections))
-		found := false
-		for _, sec := range sections {
-			if sec.typ == "routing_profile" && sec.name == profileID {
-				found = true
-				continue
-			}
-			if sec.typ == "source_rule" && sec.options["profile"] == profileID {
-				continue
-			}
-			if sec.typ == "group" && sec.options["routing_profile"] == profileID {
-				delete(sec.options, "routing_profile")
-			}
-			next = append(next, sec)
-		}
-		if !found {
-			return nil, fmt.Errorf("routing profile %q not found", profileID)
-		}
-		return next, nil
-	})
-}
-
-func UpsertSourceRule(path string, rule SourceRule) error {
+func UpsertRouteRule(path string, rule RouteRule) error {
 	if rule.ID == "" {
-		return fmt.Errorf("source rule id is required")
+		return fmt.Errorf("route rule id is required")
 	}
 	if rule.Name == "" {
 		rule.Name = rule.ID
@@ -433,9 +395,9 @@ func UpsertSourceRule(path string, rule SourceRule) error {
 		rule.Outbound = "proxy"
 	}
 	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := sourceRuleSection(rule)
+		replacement := routeRuleSection(rule)
 		for i, sec := range sections {
-			if sec.typ == "source_rule" && sec.name == rule.ID {
+			if sec.typ == "route_rule" && sec.name == rule.ID {
 				sections[i] = replacement
 				return sections, nil
 			}
@@ -444,24 +406,59 @@ func UpsertSourceRule(path string, rule SourceRule) error {
 	})
 }
 
-func DeleteSourceRule(path string, ruleID string) error {
+func DeleteRouteRule(path string, ruleID string) error {
 	if ruleID == "" {
-		return fmt.Errorf("source rule id is required")
+		return fmt.Errorf("route rule id is required")
 	}
 	return editConfig(path, func(sections []section) ([]section, error) {
 		next := make([]section, 0, len(sections))
 		found := false
 		for _, sec := range sections {
-			if sec.typ == "source_rule" && sec.name == ruleID {
+			if sec.typ == "route_rule" && sec.name == ruleID {
 				found = true
 				continue
 			}
 			next = append(next, sec)
 		}
 		if !found {
-			return nil, fmt.Errorf("source rule %q not found", ruleID)
+			return nil, fmt.Errorf("route rule %q not found", ruleID)
 		}
 		return next, nil
+	})
+}
+
+// SetGroupSettings updates the user-editable fields of a group section
+// (name, strategy, route/DNS defaults, selected node, subscriptions) while
+// preserving health metadata managed by the daemon.
+func SetGroupSettings(path string, group Group) error {
+	if group.ID == "" {
+		return fmt.Errorf("group id is required")
+	}
+	return editConfig(path, func(sections []section) ([]section, error) {
+		for i := range sections {
+			if sections[i].typ != "group" || sections[i].name != group.ID {
+				continue
+			}
+			if sections[i].options == nil {
+				sections[i].options = map[string]string{}
+			}
+			opts := sections[i].options
+			opts["name"] = valueOrDefault(group.Name, group.ID)
+			opts["strategy"] = valueOrDefault(group.Strategy, "manual")
+			opts["route_final"] = valueOrDefault(group.RouteFinal, "proxy")
+			setOrDelete(opts, "dns_final", group.DNSFinal)
+			setOrDelete(opts, "selected_node", group.SelectedNode)
+			if sections[i].lists == nil {
+				sections[i].lists = map[string][]string{}
+			}
+			if subs := cleanList(group.Subscriptions); len(subs) > 0 {
+				sections[i].lists["subscription"] = subs
+			} else {
+				delete(sections[i].lists, "subscription")
+			}
+			return sections, nil
+		}
+		return nil, fmt.Errorf("group %q not found", group.ID)
 	})
 }
 
@@ -516,8 +513,14 @@ func DeleteRuleSet(path string, rulesetID string) error {
 				found = true
 				continue
 			}
-			if sec.typ == "routing_profile" {
+			if sec.typ == "route_rule" || sec.typ == "dns_rule" {
 				removeListValue(&sec, "ruleset", rulesetID)
+				// A rule that no longer matches anything (no source IPs and no
+				// rule sets) is meaningless, so drop it instead of leaving an
+				// invalid section behind.
+				if len(sec.lists["source_ip"]) == 0 && len(sec.lists["ruleset"]) == 0 {
+					continue
+				}
 			}
 			next = append(next, sec)
 		}
@@ -528,14 +531,15 @@ func DeleteRuleSet(path string, rulesetID string) error {
 	})
 }
 
-func UpdatePAC(path string, pac PAC) error {
-	if pac.Source == "" {
-		pac.Source = "generated"
-	}
+// UpsertTProxy rewrites the transparent-proxy section. Cross-section rules
+// (e.g. tproxy and tun cannot both be enabled) are enforced by editConfig's
+// validation pass, so an invalid combination is rejected before it is written.
+func UpsertTProxy(path string, tproxy TProxy) error {
 	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := pacSection(pac)
-		for i, sec := range sections {
-			if sec.typ == "pac" && (sec.name == "pac" || sec.name == "main") {
+		replacement := tproxySection(tproxy)
+		for i := range sections {
+			if sections[i].typ == "tproxy" {
+				replacement.name = sections[i].name
 				sections[i] = replacement
 				return sections, nil
 			}
@@ -544,47 +548,18 @@ func UpdatePAC(path string, pac PAC) error {
 	})
 }
 
-func UpsertCustomPAC(path string, pac CustomPAC) error {
-	if pac.ID == "" {
-		return fmt.Errorf("custom PAC id is required")
-	}
-	if pac.Name == "" {
-		pac.Name = pac.ID
-	}
+// UpsertTUN rewrites the TUN section.
+func UpsertTUN(path string, tun TUN) error {
 	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := customPACSection(pac)
-		for i, sec := range sections {
-			if sec.typ == "pac_custom" && sec.name == pac.ID {
+		replacement := tunSection(tun)
+		for i := range sections {
+			if sections[i].typ == "tun" {
+				replacement.name = sections[i].name
 				sections[i] = replacement
 				return sections, nil
 			}
 		}
 		return append(sections, replacement), nil
-	})
-}
-
-func DeleteCustomPAC(path string, pacID string) error {
-	if pacID == "" {
-		return fmt.Errorf("custom PAC id is required")
-	}
-	return editConfig(path, func(sections []section) ([]section, error) {
-		next := make([]section, 0, len(sections))
-		found := false
-		for _, sec := range sections {
-			if sec.typ == "pac_custom" && sec.name == pacID {
-				found = true
-				continue
-			}
-			if sec.typ == "pac" && sec.options["selected_custom"] == pacID {
-				sec.options["source"] = "generated"
-				delete(sec.options, "selected_custom")
-			}
-			next = append(next, sec)
-		}
-		if !found {
-			return nil, fmt.Errorf("custom PAC %q not found", pacID)
-		}
-		return next, nil
 	})
 }
 
@@ -692,18 +667,25 @@ func subscriptionSection(subscription Subscription) section {
 	}
 }
 
-func dnsProfileSection(profile DNSProfile) section {
+func dnsRuleSection(rule DNSRule) section {
 	options := map[string]string{
-		"enabled": boolString(profile.Enabled),
-		"name":    profile.Name,
-		"mode":    valueOrDefault(profile.Mode, "direct"),
-		"hijack":  boolString(profile.Hijack),
+		"enabled": boolString(rule.Enabled),
+		"name":    valueOrDefault(rule.Name, rule.ID),
+	}
+	setOrDelete(options, "group", rule.Group)
+	setOrDelete(options, "server", rule.Server)
+	lists := map[string][]string{}
+	if sources := cleanList(rule.Sources); len(sources) > 0 {
+		lists["source_ip"] = sources
+	}
+	if rulesets := cleanList(rule.RuleSets); len(rulesets) > 0 {
+		lists["ruleset"] = rulesets
 	}
 	return section{
-		typ:     "dns_profile",
-		name:    profile.ID,
+		typ:     "dns_rule",
+		name:    rule.ID,
 		options: options,
-		lists:   map[string][]string{"server": cleanList(profile.Servers)},
+		lists:   lists,
 	}
 }
 
@@ -728,33 +710,25 @@ func dnsServerSection(server DNSServer) section {
 	}
 }
 
-func routingProfileSection(profile RoutingProfile) section {
-	options := map[string]string{
-		"enabled": boolString(profile.Enabled),
-		"name":    profile.Name,
-		"mode":    valueOrDefault(profile.Mode, "rule"),
-		"final":   valueOrDefault(profile.Final, "proxy"),
-	}
-	return section{
-		typ:     "routing_profile",
-		name:    profile.ID,
-		options: options,
-		lists:   map[string][]string{"ruleset": cleanList(profile.RuleSets)},
-	}
-}
-
-func sourceRuleSection(rule SourceRule) section {
+func routeRuleSection(rule RouteRule) section {
 	options := map[string]string{
 		"enabled":  boolString(rule.Enabled),
-		"name":     rule.Name,
-		"profile":  rule.Profile,
+		"name":     valueOrDefault(rule.Name, rule.ID),
 		"outbound": valueOrDefault(rule.Outbound, "proxy"),
 	}
+	setOrDelete(options, "group", rule.Group)
+	lists := map[string][]string{}
+	if sources := cleanList(rule.Sources); len(sources) > 0 {
+		lists["source_ip"] = sources
+	}
+	if rulesets := cleanList(rule.RuleSets); len(rulesets) > 0 {
+		lists["ruleset"] = rulesets
+	}
 	return section{
-		typ:     "source_rule",
+		typ:     "route_rule",
 		name:    rule.ID,
 		options: options,
-		lists:   map[string][]string{"source_ip": cleanList(rule.Sources)},
+		lists:   lists,
 	}
 }
 
@@ -784,38 +758,37 @@ func ruleSetSection(sectionName string, ruleset RuleSet) section {
 	}
 }
 
-func pacSection(pac PAC) section {
+func tproxySection(tproxy TProxy) section {
 	options := map[string]string{
-		"enabled":      boolString(pac.Enabled),
-		"source":       valueOrDefault(pac.Source, "generated"),
-		"local_bypass": boolString(pac.LocalBypass),
+		"enabled":     boolString(tproxy.Enabled),
+		"dns_hijack":  boolString(tproxy.DNSHijack),
+		"kill_switch": boolString(tproxy.KillSwitch),
 	}
-	if pac.SelectedCustom != "" {
-		options["selected_custom"] = pac.SelectedCustom
+	lists := map[string][]string{}
+	if v := cleanList(tproxy.LANIfnames); len(v) > 0 {
+		lists["lan_ifname"] = v
 	}
-	return section{
-		typ:     "pac",
-		name:    "pac",
-		options: options,
-		lists: map[string][]string{
-			"custom_rule": cleanList(pac.CustomRules),
-			"whitelist":   cleanList(pac.Whitelist),
-			"blacklist":   cleanList(pac.Blacklist),
-		},
+	if v := cleanList(tproxy.IncludeSubnet); len(v) > 0 {
+		lists["include_subnet"] = v
 	}
+	if v := cleanList(tproxy.ExcludeSubnet); len(v) > 0 {
+		lists["exclude_subnet"] = v
+	}
+	if v := cleanList(tproxy.IncludeMAC); len(v) > 0 {
+		lists["include_mac"] = v
+	}
+	return section{typ: "tproxy", name: "tproxy", options: options, lists: lists}
 }
 
-func customPACSection(pac CustomPAC) section {
-	return section{
-		typ:  "pac_custom",
-		name: pac.ID,
-		options: map[string]string{
-			"enabled":        boolString(pac.Enabled),
-			"name":           pac.Name,
-			"content_base64": base64.StdEncoding.EncodeToString([]byte(pac.Content)),
-		},
-		lists: map[string][]string{},
+func tunSection(tun TUN) section {
+	options := map[string]string{
+		"enabled":       boolString(tun.Enabled),
+		"auto_route":    boolString(tun.AutoRoute),
+		"auto_redirect": boolString(tun.AutoRedirect),
 	}
+	setOrDelete(options, "inet4_address", tun.Inet4Address)
+	setOrDelete(options, "inet6_address", tun.Inet6Address)
+	return section{typ: "tun", name: "tun", options: options, lists: map[string][]string{}}
 }
 
 func attachSubscriptionToGroup(sections []section, groupID string, subscriptionID string) error {
@@ -835,6 +808,14 @@ func attachSubscriptionToGroup(sections []section, groupID string, subscriptionI
 		return nil
 	}
 	return fmt.Errorf("group %q not found", groupID)
+}
+
+func setOrDelete(options map[string]string, key string, value string) {
+	if value == "" {
+		delete(options, key)
+		return
+	}
+	options[key] = value
 }
 
 func removeListValue(sec *section, key string, value string) {

@@ -433,8 +433,8 @@ proxy-test-help:
 		'  ping -c 3 1.1.1.1' \
 		'  printf "nameserver 1.1.1.1\n" > /etc/resolv.conf' \
 		'  wget -O- http://example.com/' \
-		'  wget -O- http://$(VM_GUEST_IP):1088/proxy.pac' \
 		'  http_proxy=http://$(VM_GUEST_IP):2080 wget -O- http://example.com/' \
+		'  nslookup example.com $(VM_GUEST_IP)' \
 		'' \
 		'For explicit proxy testing, singbox-manager listens on 0.0.0.0:2080 by default.' \
 		'For transparent proxy testing, enable TProxy for $(VM_LAN_DEVICE) and run plain wget/curl from Alpine.'

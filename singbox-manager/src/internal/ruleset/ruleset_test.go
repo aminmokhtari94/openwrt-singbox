@@ -35,7 +35,7 @@ func TestDownloadWritesRuleset(t *testing.T) {
 		Format:  "srs",
 		URL:     "https://example.com/geoip-test.srs",
 		Path:    path,
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("download ruleset: %v", err)
 	}

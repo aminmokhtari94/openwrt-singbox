@@ -16,12 +16,29 @@ import (
 var errUnsupportedTransport = errors.New("unsupported transport")
 
 type singBoxConfig struct {
-	Log       logConfig        `json:"log"`
-	DNS       *dnsConfig       `json:"dns,omitempty"`
-	Inbounds  []map[string]any `json:"inbounds"`
-	Outbounds []map[string]any `json:"outbounds"`
-	Route     routeConfig      `json:"route"`
+	Log          logConfig           `json:"log"`
+	DNS          *dnsConfig          `json:"dns,omitempty"`
+	Inbounds     []map[string]any    `json:"inbounds"`
+	Outbounds    []map[string]any    `json:"outbounds"`
+	Route        routeConfig         `json:"route"`
+	Experimental *experimentalConfig `json:"experimental,omitempty"`
 }
+
+// experimentalConfig enables sing-box's on-disk cache. The cache stores
+// downloaded rule-sets so that, once fetched, they survive restarts and the
+// daemon does not depend on reaching the network at every startup.
+type experimentalConfig struct {
+	CacheFile cacheFileConfig `json:"cache_file"`
+}
+
+type cacheFileConfig struct {
+	Enabled bool   `json:"enabled"`
+	Path    string `json:"path,omitempty"`
+}
+
+// CacheFilePath is where sing-box persists its cache (downloaded rule-sets,
+// FakeIP mappings, etc.).
+const CacheFilePath = "/etc/singbox-manager/cache.db"
 
 type logConfig struct {
 	Level     string `json:"level"`
@@ -47,7 +64,7 @@ func Render(cfg managerconfig.Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolvers := domainResolversForActiveProfile(cfg, proxyTag)
+	resolvers := domainResolversForActiveGroup(cfg, proxyTag)
 	applyOutboundDomainResolvers(outbounds, resolvers)
 
 	document := singBoxConfig{
@@ -59,6 +76,9 @@ func Render(cfg managerconfig.Config) ([]byte, error) {
 		Inbounds:  renderInbounds(cfg),
 		Outbounds: outbounds,
 		Route:     renderRoute(cfg, proxyTag, resolvers),
+		Experimental: &experimentalConfig{
+			CacheFile: cacheFileConfig{Enabled: true, Path: CacheFilePath},
+		},
 	}
 
 	data, err := json.MarshalIndent(document, "", "  ")
@@ -443,27 +463,71 @@ func splitCSV(value string) []string {
 }
 
 func renderDNS(cfg managerconfig.Config) *dnsConfig {
-	profile := cfg.ActiveDNSProfile()
-	if profile == nil || !profile.Enabled {
+	servers := enabledDNSServers(cfg)
+	if len(servers) == 0 {
 		return nil
 	}
 
 	dns := &dnsConfig{}
-	for _, serverID := range profile.Servers {
-		server, ok := cfg.DNSServers[serverID]
-		if !ok || !server.Enabled {
-			continue
-		}
-		entry := renderDNSServer(server, profile.Mode)
-		dns.Servers = append(dns.Servers, entry)
-		if dns.Final == "" {
-			dns.Final = server.ID
+	for _, server := range servers {
+		dns.Servers = append(dns.Servers, renderDNSServer(server))
+	}
+
+	if group := cfg.ActiveGroup(); group != nil {
+		for _, rule := range cfg.DNSRulesForGroup(group.ID) {
+			if server, ok := cfg.DNSServers[rule.Server]; !ok || !server.Enabled {
+				continue
+			}
+			sources := normalizeSourceCIDRs(rule.Sources)
+			ruleSets := enabledRuleSetIDs(cfg, rule.RuleSets)
+			if len(sources) == 0 && len(ruleSets) == 0 {
+				continue
+			}
+			entry := map[string]any{}
+			if len(sources) > 0 {
+				entry["source_ip_cidr"] = sources
+			}
+			if len(ruleSets) > 0 {
+				entry["rule_set"] = ruleSets
+			}
+			entry["server"] = rule.Server
+			dns.Rules = append(dns.Rules, entry)
 		}
 	}
-	if len(dns.Servers) == 0 {
-		return nil
-	}
+
+	dns.Final = defaultResolver(cfg, servers)
 	return dns
+}
+
+// enabledDNSServers returns every enabled DNS server, ordered by ID so the
+// rendered server list and the default resolver are deterministic.
+func enabledDNSServers(cfg managerconfig.Config) []managerconfig.DNSServer {
+	servers := make([]managerconfig.DNSServer, 0, len(cfg.DNSServers))
+	for _, server := range cfg.DNSServers {
+		if server.Enabled {
+			servers = append(servers, server)
+		}
+	}
+	for i := 1; i < len(servers); i++ {
+		for j := i; j > 0 && servers[j-1].ID > servers[j].ID; j-- {
+			servers[j-1], servers[j] = servers[j], servers[j-1]
+		}
+	}
+	return servers
+}
+
+// defaultResolver picks the group's preferred resolver, falling back to the
+// first enabled server.
+func defaultResolver(cfg managerconfig.Config, servers []managerconfig.DNSServer) string {
+	if group := cfg.ActiveGroup(); group != nil && group.DNSFinal != "" {
+		if server, ok := cfg.DNSServers[group.DNSFinal]; ok && server.Enabled {
+			return group.DNSFinal
+		}
+	}
+	if len(servers) > 0 {
+		return servers[0].ID
+	}
+	return ""
 }
 
 type domainResolvers struct {
@@ -471,41 +535,40 @@ type domainResolvers struct {
 	byOutbound      map[string]string
 }
 
-func domainResolversForActiveProfile(cfg managerconfig.Config, proxyTag string) domainResolvers {
-	resolvers := domainResolvers{byOutbound: map[string]string{}}
-	profile := cfg.ActiveDNSProfile()
-	if profile == nil || !profile.Enabled {
-		return resolvers
+// domainResolversForActiveGroup maps each outbound to the DNS server that
+// resolves domains for connections leaving via that outbound. A server's
+// detour ("direct"/"proxy") determines which outbound it serves.
+func domainResolversForActiveGroup(cfg managerconfig.Config, proxyTag string) domainResolvers {
+	servers := enabledDNSServers(cfg)
+	resolvers := domainResolvers{
+		defaultResolver: defaultResolver(cfg, servers),
+		byOutbound:      map[string]string{},
 	}
-
-	for _, serverID := range profile.Servers {
-		server, ok := cfg.DNSServers[serverID]
-		if !ok || !server.Enabled {
+	for _, server := range servers {
+		outbound := server.Detour
+		if outbound == "" {
 			continue
 		}
-		if resolvers.defaultResolver == "" {
-			resolvers.defaultResolver = server.ID
+		if outbound == "proxy" {
+			outbound = proxyTag
 		}
-		if profile.Mode != "split" {
-			continue
+		if _, exists := resolvers.byOutbound[outbound]; !exists {
+			resolvers.byOutbound[outbound] = server.ID
 		}
-		detour := server.Detour
-		if detour == "proxy" {
-			detour = proxyTag
-		}
-		if detour == "" {
-			continue
-		}
-		if _, exists := resolvers.byOutbound[detour]; !exists {
-			resolvers.byOutbound[detour] = server.ID
-		}
-	}
-
-	final := routeFinal(cfg, proxyTag)
-	if resolver := resolvers.byOutbound[final]; resolver != "" {
-		resolvers.defaultResolver = resolver
 	}
 	return resolvers
+}
+
+// enabledRuleSetIDs filters a list of rule-set references to those that exist
+// and are enabled, preserving order.
+func enabledRuleSetIDs(cfg managerconfig.Config, ids []string) []string {
+	filtered := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if ruleset, ok := cfg.RuleSets[id]; ok && ruleset.Enabled {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
 }
 
 func applyOutboundDomainResolvers(outbounds []map[string]any, resolvers domainResolvers) {
@@ -528,7 +591,7 @@ func supportsDomainResolver(outbound map[string]any) bool {
 	}
 }
 
-func renderDNSServer(server managerconfig.DNSServer, profileMode string) map[string]any {
+func renderDNSServer(server managerconfig.DNSServer) map[string]any {
 	dnsType := normalizeDNSType(server.Type)
 	host, port, path := parseDNSAddress(server.Address, dnsType)
 	entry := map[string]any{
@@ -547,12 +610,8 @@ func renderDNSServer(server managerconfig.DNSServer, profileMode string) map[str
 	if dnsType == "https" || dnsType == "tls" || dnsType == "quic" {
 		entry["tls"] = map[string]any{"enabled": true}
 	}
-	detour := server.Detour
-	if detour == "" && profileMode == "proxy" {
-		detour = "proxy"
-	}
-	if detour != "" && detour != "direct" {
-		entry["detour"] = detour
+	if server.Detour != "" {
+		entry["detour"] = server.Detour
 	}
 	return entry
 }
@@ -646,68 +705,70 @@ func renderRoute(cfg managerconfig.Config, proxyTag string, resolvers domainReso
 		})
 	}
 
-	profile := cfg.ActiveRoutingProfile()
-	if cfg.Manager.RuntimeMode != "rule" || profile == nil || !profile.Enabled {
+	group := cfg.ActiveGroup()
+	if group == nil {
 		return route
 	}
 
-	for _, rule := range sourceRulesForProfile(cfg, profile.ID) {
-		sourceCIDRs := normalizeSourceCIDRs(rule.Sources)
-		if rule.Outbound == "dns" {
-			route.Rules = append(route.Rules, map[string]any{
-				"source_ip_cidr": sourceCIDRs,
-				"protocol":       "dns",
-				"action":         "hijack-dns",
-			})
-			route.Rules = append(route.Rules, map[string]any{
-				"source_ip_cidr": sourceCIDRs,
-				"outbound":       "direct",
-			})
-			continue
+	used := map[string]bool{}
+	if cfg.Manager.RuntimeMode == "rule" {
+		for _, rule := range cfg.RouteRulesForGroup(group.ID) {
+			sources := normalizeSourceCIDRs(rule.Sources)
+			ruleSets := enabledRuleSetIDs(cfg, rule.RuleSets)
+			if len(sources) == 0 && len(ruleSets) == 0 {
+				continue
+			}
+			entry := map[string]any{}
+			if len(sources) > 0 {
+				entry["source_ip_cidr"] = sources
+			}
+			if len(ruleSets) > 0 {
+				entry["rule_set"] = ruleSets
+				for _, id := range ruleSets {
+					used[id] = true
+				}
+			}
+			outbound := rule.Outbound
+			if outbound == "proxy" || outbound == "" {
+				outbound = proxyTag
+			}
+			entry["outbound"] = outbound
+			route.Rules = append(route.Rules, entry)
 		}
-		outbound := rule.Outbound
-		if outbound == "proxy" || outbound == "" {
-			outbound = proxyTag
-		}
-		route.Rules = append(route.Rules, map[string]any{
-			"source_ip_cidr": sourceCIDRs,
-			"outbound":       outbound,
-		})
 	}
 
-	for _, rulesetID := range profile.RuleSets {
-		ruleset, ok := cfg.RuleSets[rulesetID]
+	// DNS rules render regardless of route mode, so their rule sets must be
+	// defined too. Collect every rule set referenced by the active group.
+	for _, rule := range cfg.DNSRulesForGroup(group.ID) {
+		for _, id := range enabledRuleSetIDs(cfg, rule.RuleSets) {
+			used[id] = true
+		}
+	}
+
+	for _, id := range sortedKeys(used) {
+		ruleset, ok := cfg.RuleSets[id]
 		if !ok || !ruleset.Enabled {
 			continue
 		}
-		entry := renderRuleSet(ruleset)
-		if entry == nil {
-			continue
+		if entry := renderRuleSet(ruleset, proxyTag); entry != nil {
+			route.RuleSet = append(route.RuleSet, entry)
 		}
-		route.RuleSet = append(route.RuleSet, entry)
-		route.Rules = append(route.Rules, map[string]any{
-			"rule_set": []string{ruleset.ID},
-			"outbound": "direct",
-		})
 	}
 
 	return route
 }
 
-func sourceRulesForProfile(cfg managerconfig.Config, profileID string) []managerconfig.SourceRule {
-	rules := make([]managerconfig.SourceRule, 0, len(cfg.SourceRules))
-	for _, rule := range cfg.SourceRules {
-		if !rule.Enabled || rule.Profile != profileID || len(rule.Sources) == 0 {
-			continue
-		}
-		rules = append(rules, rule)
+func sortedKeys(set map[string]bool) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
 	}
-	for i := 1; i < len(rules); i++ {
-		for j := i; j > 0 && rules[j-1].ID > rules[j].ID; j-- {
-			rules[j-1], rules[j] = rules[j], rules[j-1]
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j-1] > keys[j]; j-- {
+			keys[j-1], keys[j] = keys[j], keys[j-1]
 		}
 	}
-	return rules
+	return keys
 }
 
 func normalizeSourceCIDRs(sources []string) []string {
@@ -731,11 +792,7 @@ func normalizeSourceCIDRs(sources []string) []string {
 }
 
 func dnsHijackEnabled(cfg managerconfig.Config) bool {
-	if cfg.TProxy.Enabled && cfg.TProxy.DNSHijack {
-		return true
-	}
-	profile := cfg.ActiveDNSProfile()
-	return profile != nil && profile.Enabled && profile.Hijack
+	return cfg.TProxy.Enabled && cfg.TProxy.DNSHijack
 }
 
 func routeFinal(cfg managerconfig.Config, proxyTag string) string {
@@ -746,17 +803,14 @@ func routeFinal(cfg managerconfig.Config, proxyTag string) string {
 		return proxyTag
 	}
 
-	profile := cfg.ActiveRoutingProfile()
-	if profile == nil || profile.Final == "" {
+	group := cfg.ActiveGroup()
+	if group == nil || group.RouteFinal == "" || group.RouteFinal == "proxy" {
 		return proxyTag
 	}
-	if profile.Final == "proxy" {
-		return proxyTag
-	}
-	return profile.Final
+	return group.RouteFinal
 }
 
-func renderRuleSet(ruleset managerconfig.RuleSet) map[string]any {
+func renderRuleSet(ruleset managerconfig.RuleSet, downloadDetour string) map[string]any {
 	format := "binary"
 	if ruleset.Format == "source" {
 		format = "source"
@@ -772,12 +826,20 @@ func renderRuleSet(ruleset managerconfig.RuleSet) map[string]any {
 	}
 
 	if ruleset.Type == "remote" && ruleset.URL != "" {
+		// Fetch remote rule-sets through the proxy. Their hosts (e.g.
+		// raw.githubusercontent.com) are frequently censored on the same
+		// networks where this manager runs, so a "direct" download reliably
+		// fails and takes sing-box startup down with it. Combined with the
+		// cache_file, the first successful fetch is reused on later boots.
+		if downloadDetour == "" {
+			downloadDetour = "proxy"
+		}
 		entry := map[string]any{
 			"type":            "remote",
 			"tag":             ruleset.ID,
 			"format":          format,
 			"url":             ruleset.URL,
-			"download_detour": "direct",
+			"download_detour": downloadDetour,
 		}
 		if ruleset.UpdateInterval != "" {
 			entry["update_interval"] = ruleset.UpdateInterval

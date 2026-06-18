@@ -5,53 +5,6 @@ mkdir -p /etc/singbox-manager/rulesets
 mkdir -p /var/run/singbox-manager
 mkdir -p /var/run/sing-box
 
-migrate_duplicate_main_sections() {
-	local config="/etc/config/singbox-manager"
-
-	[ -f "$config" ] || return 0
-	sed -i \
-		-e "s/^config pac 'main'$/config pac 'pac'/" \
-		-e 's/^config pac "main"$/config pac "pac"/' \
-		-e "s/^config tproxy 'main'$/config tproxy 'tproxy'/" \
-		-e 's/^config tproxy "main"$/config tproxy "tproxy"/' \
-		-e "s/^config tun 'main'$/config tun 'tun'/" \
-		-e 's/^config tun "main"$/config tun "tun"/' \
-		"$config"
-}
-
-rename_singleton_section() {
-	local type="$1"
-	local old_name="$2"
-	local new_name="$3"
-	local current
-
-	current="$(uci -q show singbox-manager | sed -n "s/^singbox-manager\\.\\([^.=]*\\)=$type$/\\1/p" | head -n 1)"
-	[ -n "$current" ] || return 0
-	[ "$current" = "$new_name" ] && return 0
-	[ "$current" = "$old_name" ] || return 0
-
-	uci -q rename "singbox-manager.$current=$new_name"
-}
-
-migrate_mixed_listen_default() {
-	local current
-
-	current="$(uci -q get singbox-manager.main.mixed_listen)"
-	if [ -z "$current" ] || [ "$current" = "127.0.0.1" ]; then
-		uci -q set singbox-manager.main.mixed_listen='0.0.0.0'
-	fi
-}
-
-migrate_duplicate_main_sections
-
-if uci -q show singbox-manager >/dev/null 2>&1; then
-	rename_singleton_section pac pac pac
-	rename_singleton_section tproxy tproxy tproxy
-	rename_singleton_section tun tun tun
-	migrate_mixed_listen_default
-	uci -q commit singbox-manager
-fi
-
 [ -x /etc/init.d/singbox-managerd ] && /etc/init.d/singbox-managerd enable
 
 exit 0

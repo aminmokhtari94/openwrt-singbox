@@ -1,10 +1,32 @@
 {
   "log": {
-    "level": "debug",
+    "level": "info",
     "timestamp": true
   },
   "dns": {
     "servers": [
+      {
+        "detour": "proxy",
+        "path": "/dns-query",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "tag": "cloudflare_doh",
+        "tls": {
+          "enabled": true
+        },
+        "type": "https"
+      },
+      {
+        "detour": "direct",
+        "path": "/dns-query",
+        "server": "1.1.1.1",
+        "server_port": 443,
+        "tag": "cloudflare_doh_direct",
+        "tls": {
+          "enabled": true
+        },
+        "type": "https"
+      },
       {
         "server": "223.5.5.5",
         "server_port": 53,
@@ -12,7 +34,21 @@
         "type": "udp"
       }
     ],
-    "final": "local_udp"
+    "rules": [
+      {
+        "server": "cloudflare_doh",
+        "source_ip_cidr": [
+          "192.168.200.124/32"
+        ]
+      },
+      {
+        "server": "cloudflare_doh_direct",
+        "source_ip_cidr": [
+          "192.168.200.125/32"
+        ]
+      }
+    ],
+    "final": "cloudflare_doh"
   },
   "inbounds": [
     {
@@ -21,11 +57,25 @@
       "sniff": true,
       "tag": "mixed-in",
       "type": "mixed"
+    },
+    {
+      "listen": "::",
+      "listen_port": 7893,
+      "sniff": true,
+      "tag": "tproxy-in",
+      "type": "tproxy"
+    },
+    {
+      "listen": "::",
+      "listen_port": 1053,
+      "sniff": true,
+      "tag": "dns-in",
+      "type": "direct"
     }
   ],
   "outbounds": [
     {
-      "domain_resolver": "local_udp",
+      "domain_resolver": "cloudflare_doh_direct",
       "tag": "direct",
       "type": "direct"
     },
@@ -34,17 +84,29 @@
       "type": "block"
     },
     {
-      "method": "2022-blake3-aes-128-gcm",
-      "password": "secret",
-      "server": "edge.example.com",
-      "server_port": 8388,
-      "tag": "node-ss",
-      "type": "shadowsocks"
+      "server": "69.84.182.16",
+      "server_port": 443,
+      "tag": "vless_0b96da71_f27d0bbdc3",
+      "tls": {
+        "alpn": [
+          "http/1.1"
+        ],
+        "enabled": true,
+        "insecure": true,
+        "server_name": "v2.mokhtari94.ir"
+      },
+      "transport": {
+        "host": "v2.mokhtari94.ir",
+        "path": "/87IIO0MKecX3r8BQxdso",
+        "type": "httpupgrade"
+      },
+      "type": "vless",
+      "uuid": "abd4fd93-f23d-4c2e-ac8a-bce395947e6d"
     },
     {
-      "default": "node-ss",
+      "default": "vless_0b96da71_f27d0bbdc3",
       "outbounds": [
-        "node-ss",
+        "vless_0b96da71_f27d0bbdc3",
         "direct"
       ],
       "tag": "proxy",
@@ -54,22 +116,69 @@
   "route": {
     "rules": [
       {
+        "action": "hijack-dns",
+        "protocol": "dns"
+      },
+      {
+        "outbound": "direct",
+        "source_ip_cidr": [
+          "192.168.200.124/32"
+        ]
+      },
+      {
         "outbound": "direct",
         "rule_set": [
           "geoip-ir"
+        ],
+        "source_ip_cidr": [
+          "192.168.200.125/32"
+        ]
+      },
+      {
+        "outbound": "proxy",
+        "source_ip_cidr": [
+          "192.168.200.125/32"
+        ]
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "geoip-ir"
+        ]
+      },
+      {
+        "outbound": "direct",
+        "rule_set": [
+          "geosite-ir"
         ]
       }
     ],
     "rule_set": [
       {
+        "download_detour": "proxy",
         "format": "binary",
-        "path": "/tmp/geoip-ir.srs",
         "tag": "geoip-ir",
-        "type": "local"
+        "type": "remote",
+        "update_interval": "168h",
+        "url": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs"
+      },
+      {
+        "download_detour": "proxy",
+        "format": "binary",
+        "tag": "geosite-ir",
+        "type": "remote",
+        "update_interval": "168h",
+        "url": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs"
       }
     ],
     "final": "proxy",
     "auto_detect_interface": true,
-    "default_domain_resolver": "local_udp"
+    "default_domain_resolver": "cloudflare_doh"
+  },
+  "experimental": {
+    "cache_file": {
+      "enabled": true,
+      "path": "/etc/singbox-manager/cache.db"
+    }
   }
 }

@@ -64,6 +64,13 @@ func Parse(data []byte, format string) ([]managerconfig.Node, error) {
 		return nil, err
 	}
 
+	// Many providers serve a full sing-box JSON config (or a bare outbounds
+	// array) instead of a list of share URIs. Detect and parse that here so we
+	// don't treat each JSON token as an unsupported URI.
+	if looksLikeJSONConfig(payload) {
+		return parseSingBoxConfig([]byte(strings.TrimSpace(payload)))
+	}
+
 	var nodes []managerconfig.Node
 	var parseErrors []string
 	for _, line := range strings.FieldsFunc(payload, func(r rune) bool {
@@ -150,13 +157,189 @@ func ParseURI(raw string) (managerconfig.Node, error) {
 	}
 }
 
+// supportedOutboundTypes lists the sing-box outbound types that map to a proxy
+// node. Group/built-in outbounds (selector, urltest, direct, block, dns) are
+// skipped during import.
+var supportedOutboundTypes = map[string]bool{
+	"shadowsocks": true,
+	"vmess":       true,
+	"vless":       true,
+	"trojan":      true,
+	"hysteria2":   true,
+	"tuic":        true,
+}
+
+// parseSingBoxConfig extracts proxy nodes from a full sing-box JSON config or a
+// bare array of outbound objects.
+func parseSingBoxConfig(data []byte) ([]managerconfig.Node, error) {
+	var outbounds []any
+
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err == nil {
+		raw, ok := doc["outbounds"].([]any)
+		if !ok {
+			return nil, fmt.Errorf("sing-box config has no outbounds array")
+		}
+		outbounds = raw
+	} else {
+		if err2 := json.Unmarshal(data, &outbounds); err2 != nil {
+			return nil, fmt.Errorf("invalid sing-box JSON config: %w", err)
+		}
+	}
+
+	var nodes []managerconfig.Node
+	for _, item := range outbounds {
+		outbound, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		node, ok := outboundToNode(outbound)
+		if !ok {
+			continue
+		}
+		nodes = append(nodes, node)
+	}
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("no proxy nodes found in sing-box config")
+	}
+	return nodes, nil
+}
+
+func outboundToNode(outbound map[string]any) (managerconfig.Node, bool) {
+	typ := stringField(outbound, "type")
+	if !supportedOutboundTypes[typ] {
+		return managerconfig.Node{}, false
+	}
+	server := stringField(outbound, "server")
+	if server == "" {
+		return managerconfig.Node{}, false
+	}
+	node := managerconfig.Node{
+		Enabled:      true,
+		Type:         typ,
+		Name:         stringField(outbound, "tag"),
+		Server:       server,
+		Port:         intField(outbound, "server_port"),
+		UUID:         stringField(outbound, "uuid"),
+		Password:     stringField(outbound, "password"),
+		Method:       stringField(outbound, "method"),
+		Security:     stringField(outbound, "security"),
+		Flow:         stringField(outbound, "flow"),
+		Congestion:   stringField(outbound, "congestion_control"),
+		UDPRelayMode: stringField(outbound, "udp_relay_mode"),
+	}
+	applyJSONTLS(&node, outbound["tls"])
+	applyJSONTransport(&node, outbound["transport"])
+	if node.Name == "" {
+		node.Name = node.Server
+	}
+	return node, true
+}
+
+func applyJSONTLS(node *managerconfig.Node, raw any) {
+	tls, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	if enabled, ok := tls["enabled"].(bool); ok && enabled {
+		node.TLS = true
+		if node.Security == "" {
+			node.Security = "tls"
+		}
+	}
+	if _, ok := tls["reality"].(map[string]any); ok {
+		node.Security = "reality"
+		node.TLS = true
+	}
+	if sni := stringField(tls, "server_name"); sni != "" {
+		node.SNI = sni
+	}
+	if alpn := joinStringList(tls["alpn"]); alpn != "" {
+		node.ALPN = alpn
+	}
+	if insecure, ok := tls["insecure"].(bool); ok {
+		node.Insecure = insecure
+	}
+}
+
+func applyJSONTransport(node *managerconfig.Node, raw any) {
+	transport, ok := raw.(map[string]any)
+	if !ok {
+		return
+	}
+	node.Transport = normalizeTransport(stringField(transport, "type"))
+	node.Path = stringField(transport, "path")
+	switch node.Transport {
+	case "ws":
+		node.Host = headerHost(transport["headers"])
+		if node.Host == "" {
+			node.Host = stringField(transport, "host")
+		}
+	case "httpupgrade":
+		node.Host = stringField(transport, "host")
+		if node.Host == "" {
+			node.Host = headerHost(transport["headers"])
+		}
+	case "grpc":
+		if name := stringField(transport, "service_name"); name != "" {
+			node.Path = name
+		}
+	}
+}
+
+// headerHost extracts a Host header value from a transport headers object. The
+// key is matched case-insensitively and the value may be a string or a list of
+// strings (sing-box accepts both forms).
+func headerHost(raw any) string {
+	headers, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for key, value := range headers {
+		if strings.EqualFold(key, "host") {
+			return firstStringValue(value)
+		}
+	}
+	return ""
+}
+
+func firstStringValue(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case []any:
+		for _, item := range value {
+			if text, ok := item.(string); ok && text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func joinStringList(raw any) string {
+	switch value := raw.(type) {
+	case string:
+		return value
+	case []any:
+		var parts []string
+		for _, item := range value {
+			if text, ok := item.(string); ok && text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, ",")
+	}
+	return ""
+}
+
 func decodePayload(payload string, format string) (string, error) {
 	switch format {
 	case "", "auto":
-		if looksPlain(payload) {
+		if looksPlain(payload) || looksLikeJSONConfig(payload) {
 			return payload, nil
 		}
-		if decoded, ok := decodeBase64(payload); ok && looksPlain(decoded) {
+		if decoded, ok := decodeBase64(payload); ok && (looksPlain(decoded) || looksLikeJSONConfig(decoded)) {
 			return decoded, nil
 		}
 		return payload, nil
@@ -181,6 +364,11 @@ func looksPlain(payload string) bool {
 		strings.Contains(payload, "hysteria2://") ||
 		strings.Contains(payload, "hy2://") ||
 		strings.Contains(payload, "tuic://")
+}
+
+func looksLikeJSONConfig(payload string) bool {
+	trimmed := strings.TrimSpace(payload)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
 }
 
 func decodeBase64(value string) (string, bool) {

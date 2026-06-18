@@ -25,7 +25,6 @@ import (
 	managerconfig "github.com/openwrt-singbox/singbox-manager/internal/config"
 	"github.com/openwrt-singbox/singbox-manager/internal/firewall"
 	"github.com/openwrt-singbox/singbox-manager/internal/health"
-	"github.com/openwrt-singbox/singbox-manager/internal/pac"
 	"github.com/openwrt-singbox/singbox-manager/internal/render"
 	"github.com/openwrt-singbox/singbox-manager/internal/ruleset"
 	"github.com/openwrt-singbox/singbox-manager/internal/runtime"
@@ -47,7 +46,6 @@ type ManagerConfig struct {
 	LatencyMS     int    `json:"latency_ms"`
 	SocketPath    string `json:"socket_path"`
 	SingBoxBinary string `json:"sing_box_bin"`
-	PACListen     string `json:"pac_listen"`
 	TProxyEnabled bool   `json:"tproxy_enabled"`
 	DNSHijack     bool   `json:"dns_hijack"`
 	KillSwitch    bool   `json:"kill_switch"`
@@ -154,13 +152,14 @@ type NodePayload struct {
 	Subscription string `json:"subscription"`
 }
 
-type DNSProfilePayload struct {
-	ID      string   `json:"id"`
-	Enabled *bool    `json:"enabled,omitempty"`
-	Name    string   `json:"name"`
-	Mode    string   `json:"mode"`
-	Servers []string `json:"servers"`
-	Hijack  bool     `json:"hijack"`
+type GroupPayload struct {
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Strategy      string   `json:"strategy"`
+	RouteFinal    string   `json:"route_final"`
+	DNSFinal      string   `json:"dns_final"`
+	SelectedNode  string   `json:"selected_node"`
+	Subscriptions []string `json:"subscriptions"`
 }
 
 type DNSServerPayload struct {
@@ -172,13 +171,14 @@ type DNSServerPayload struct {
 	Detour  string `json:"detour"`
 }
 
-type RoutingProfilePayload struct {
+type DNSRulePayload struct {
 	ID       string   `json:"id"`
 	Enabled  *bool    `json:"enabled,omitempty"`
 	Name     string   `json:"name"`
-	Mode     string   `json:"mode"`
+	Group    string   `json:"group"`
+	Sources  []string `json:"sources"`
 	RuleSets []string `json:"rulesets"`
-	Final    string   `json:"final"`
+	Server   string   `json:"server"`
 }
 
 type RuleSetPayload struct {
@@ -192,30 +192,32 @@ type RuleSetPayload struct {
 	UpdateInterval string `json:"update_interval"`
 }
 
-type SourceRulePayload struct {
+type RouteRulePayload struct {
 	ID       string   `json:"id"`
 	Enabled  *bool    `json:"enabled,omitempty"`
 	Name     string   `json:"name"`
-	Profile  string   `json:"profile"`
+	Group    string   `json:"group"`
 	Sources  []string `json:"sources"`
+	RuleSets []string `json:"rulesets"`
 	Outbound string   `json:"outbound"`
 }
 
-type PACSettingsPayload struct {
-	Enabled        *bool    `json:"enabled,omitempty"`
-	Source         string   `json:"source"`
-	SelectedCustom string   `json:"selected_custom"`
-	LocalBypass    *bool    `json:"local_bypass,omitempty"`
-	CustomRules    []string `json:"custom_rules"`
-	Whitelist      []string `json:"whitelist"`
-	Blacklist      []string `json:"blacklist"`
+type TProxyPayload struct {
+	Enabled       bool     `json:"enabled"`
+	LANIfnames    []string `json:"lan_ifnames"`
+	IncludeSubnet []string `json:"include_subnet"`
+	ExcludeSubnet []string `json:"exclude_subnet"`
+	IncludeMAC    []string `json:"include_mac"`
+	DNSHijack     bool     `json:"dns_hijack"`
+	KillSwitch    bool     `json:"kill_switch"`
 }
 
-type CustomPACPayload struct {
-	ID      string `json:"id"`
-	Enabled *bool  `json:"enabled,omitempty"`
-	Name    string `json:"name"`
-	Content string `json:"content"`
+type TUNPayload struct {
+	Enabled      bool   `json:"enabled"`
+	AutoRoute    bool   `json:"auto_route"`
+	AutoRedirect bool   `json:"auto_redirect"`
+	Inet4Address string `json:"inet4_address"`
+	Inet6Address string `json:"inet6_address"`
 }
 
 type LogsParams struct {
@@ -273,8 +275,6 @@ func runServe(args []string) {
 	if *socketPath != "" {
 		cfg.SocketPath = *socketPath
 	}
-
-	startPACServer(*configPath, cfg.PACListen)
 
 	if err := os.MkdirAll(filepath.Dir(cfg.SocketPath), 0755); err != nil {
 		log.Fatalf("failed to create socket directory: %v", err)
@@ -383,38 +383,6 @@ func startSubscriptionScheduler(configPath string) {
 	}()
 }
 
-func startPACServer(configPath string, listen string) {
-	if listen == "" {
-		return
-	}
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/proxy.pac", func(w http.ResponseWriter, r *http.Request) {
-			cfg, err := managerconfig.Load(configPath)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if !cfg.PAC.Enabled {
-				http.Error(w, "PAC is disabled", http.StatusNotFound)
-				return
-			}
-			data, err := pac.RenderActiveForProxyHost(*cfg, r.Host)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(data)
-		})
-		log.Printf("PAC server listening on %s", listen)
-		if err := http.ListenAndServe(listen, mux); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("PAC server stopped: %v", err)
-		}
-	}()
-}
-
 func startHealthScheduler(configPath string) {
 	go func() {
 		delay := 5 * time.Second
@@ -464,11 +432,12 @@ func startRuleSetScheduler(configPath string) {
 			if !cfg.Manager.Enabled {
 				continue
 			}
+			proxyAddr := localProxyAddr(*cfg)
 			for _, entry := range cfg.RuleSets {
 				if !ruleset.Due(entry, time.Now().UTC()) {
 					continue
 				}
-				result, err := ruleset.Download(context.Background(), entry)
+				result, err := ruleset.Download(context.Background(), entry, proxyAddr)
 				if err != nil {
 					_ = managerconfig.MarkRuleSetError(configPath, entry.ID, err.Error())
 					log.Printf("scheduled ruleset %s update failed: %v", entry.ID, err)
@@ -490,51 +459,48 @@ func runRPCD(args []string) {
 	switch args[0] {
 	case "list":
 		writeJSON(map[string]map[string]any{
-			"status":                 {},
-			"start":                  {},
-			"stop":                   {},
-			"restart":                {},
-			"reload":                 {},
-			"validate":               {},
-			"manager_set_enabled":    {"enabled": "boolean"},
-			"subscriptions":          {},
-			"subscription_set":       {"subscription": "object"},
-			"subscription_delete":    {"id": "string"},
-			"subscription_import":    {"request": "object"},
-			"refresh_subscription":   {"id": "string"},
-			"refresh_subscriptions":  {},
-			"nodes":                  {},
-			"node_set":               {"node": "object"},
-			"node_delete":            {"id": "string"},
-			"node_select":            {"id": "string"},
-			"node_ping_test":         {"id": "string"},
-			"node_latency_test":      {"id": "string", "url": "string"},
-			"health_check":           {},
-			"latency_test":           {"url": "string"},
-			"dns":                    {},
-			"dns_profile_set":        {"profile": "object"},
-			"dns_profile_delete":     {"id": "string"},
-			"dns_server_set":         {"server": "object"},
-			"dns_server_delete":      {"id": "string"},
-			"dns_test":               {"server": "string", "domain": "string"},
-			"rulesets":               {},
-			"routing_profile_set":    {"profile": "object"},
-			"routing_profile_delete": {"id": "string"},
-			"ruleset_set":            {"ruleset": "object"},
-			"ruleset_delete":         {"id": "string"},
-			"refresh_ruleset":        {"id": "string"},
-			"source_rule_set":        {"rule": "object"},
-			"source_rule_delete":     {"id": "string"},
-			"pac":                    {},
-			"pac_set":                {"pac": "object"},
-			"pac_custom_set":         {"pac": "object"},
-			"pac_custom_delete":      {"id": "string"},
-			"pac_custom_save":        {"pac": "object"},
-			"runtime_stats":          {},
-			"logs":                   {"lines": "number"},
-			"devices":                {},
-			"tproxy":                 {},
-			"tun":                    {},
+			"status":                {},
+			"start":                 {},
+			"stop":                  {},
+			"restart":               {},
+			"reload":                {},
+			"validate":              {},
+			"manager_set_enabled":   {"enabled": "boolean"},
+			"manager_set_mode":      {"mode": "string"},
+			"group_set":             {"group": "object"},
+			"subscriptions":         {},
+			"subscription_set":      {"subscription": "object"},
+			"subscription_delete":   {"id": "string"},
+			"subscription_import":   {"request": "object"},
+			"refresh_subscription":  {"id": "string"},
+			"refresh_subscriptions": {},
+			"nodes":                 {},
+			"node_set":              {"node": "object"},
+			"node_delete":           {"id": "string"},
+			"node_select":           {"id": "string"},
+			"node_ping_test":        {"id": "string"},
+			"node_latency_test":     {"id": "string", "url": "string"},
+			"health_check":          {},
+			"latency_test":          {"url": "string"},
+			"dns":                   {},
+			"dns_server_set":        {"server": "object"},
+			"dns_server_delete":     {"id": "string"},
+			"dns_rule_set":          {"rule": "object"},
+			"dns_rule_delete":       {"id": "string"},
+			"dns_test":              {"server": "string", "domain": "string"},
+			"routing":               {},
+			"route_rule_set":        {"rule": "object"},
+			"route_rule_delete":     {"id": "string"},
+			"ruleset_set":           {"ruleset": "object"},
+			"ruleset_delete":        {"id": "string"},
+			"refresh_ruleset":       {"id": "string"},
+			"runtime_stats":         {},
+			"logs":                  {"lines": "number"},
+			"devices":               {},
+			"tproxy":                {},
+			"tproxy_set":            {"tproxy": "object"},
+			"tun":                   {},
+			"tun_set":               {"tun": "object"},
 		})
 	case "call":
 		if len(args) < 2 {
@@ -611,26 +577,30 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, validateRuntimeConfig(configPath))
 	case "manager_set_enabled":
 		writeHTTPJSON(w, http.StatusOK, setManagerEnabled(configPath, req.Params))
+	case "manager_set_mode":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setManagerMode(configPath, req.Params)))
+	case "group_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setGroup(configPath, req.Params)))
 	case "subscriptions":
 		writeHTTPJSON(w, http.StatusOK, listSubscriptions(configPath))
 	case "subscription_set":
-		writeHTTPJSON(w, http.StatusOK, setSubscription(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setSubscription(configPath, req.Params)))
 	case "subscription_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteSubscription(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteSubscription(configPath, req.Params)))
 	case "subscription_import":
-		writeHTTPJSON(w, http.StatusOK, importSubscription(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, importSubscription(configPath, req.Params)))
 	case "refresh_subscription":
-		writeHTTPJSON(w, http.StatusOK, refreshSubscription(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, refreshSubscription(configPath, req.Params)))
 	case "refresh_subscriptions":
-		writeHTTPJSON(w, http.StatusOK, refreshSubscriptions(configPath))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, refreshSubscriptions(configPath)))
 	case "nodes":
 		writeHTTPJSON(w, http.StatusOK, listNodes(configPath))
 	case "node_set":
-		writeHTTPJSON(w, http.StatusOK, setNode(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setNode(configPath, req.Params)))
 	case "node_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteNode(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteNode(configPath, req.Params)))
 	case "node_select":
-		writeHTTPJSON(w, http.StatusOK, selectNode(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, selectNode(configPath, req.Params)))
 	case "node_ping_test":
 		writeHTTPJSON(w, http.StatusOK, nodePingTest(configPath, req.Params))
 	case "node_latency_test":
@@ -641,42 +611,28 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, latencyTest(req.Params))
 	case "dns":
 		writeHTTPJSON(w, http.StatusOK, listDNS(configPath))
-	case "dns_profile_set":
-		writeHTTPJSON(w, http.StatusOK, setDNSProfile(configPath, req.Params))
-	case "dns_profile_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteDNSProfile(configPath, req.Params))
 	case "dns_server_set":
-		writeHTTPJSON(w, http.StatusOK, setDNSServer(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setDNSServer(configPath, req.Params)))
 	case "dns_server_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteDNSServer(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteDNSServer(configPath, req.Params)))
+	case "dns_rule_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setDNSRule(configPath, req.Params)))
+	case "dns_rule_delete":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteDNSRule(configPath, req.Params)))
 	case "dns_test":
 		writeHTTPJSON(w, http.StatusOK, dnsTest(configPath, req.Params))
-	case "rulesets":
-		writeHTTPJSON(w, http.StatusOK, listRuleSets(configPath))
-	case "routing_profile_set":
-		writeHTTPJSON(w, http.StatusOK, setRoutingProfile(configPath, req.Params))
-	case "routing_profile_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteRoutingProfile(configPath, req.Params))
+	case "routing":
+		writeHTTPJSON(w, http.StatusOK, listRouting(configPath))
+	case "route_rule_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setRouteRule(configPath, req.Params)))
+	case "route_rule_delete":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteRouteRule(configPath, req.Params)))
 	case "ruleset_set":
-		writeHTTPJSON(w, http.StatusOK, setRuleSet(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setRuleSet(configPath, req.Params)))
 	case "ruleset_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteRuleSet(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, deleteRuleSet(configPath, req.Params)))
 	case "refresh_ruleset":
-		writeHTTPJSON(w, http.StatusOK, refreshRuleSet(configPath, req.Params))
-	case "source_rule_set":
-		writeHTTPJSON(w, http.StatusOK, setSourceRule(configPath, req.Params))
-	case "source_rule_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteSourceRule(configPath, req.Params))
-	case "pac":
-		writeHTTPJSON(w, http.StatusOK, pacStatus(configPath))
-	case "pac_set":
-		writeHTTPJSON(w, http.StatusOK, setPAC(configPath, req.Params))
-	case "pac_custom_set":
-		writeHTTPJSON(w, http.StatusOK, setCustomPAC(configPath, req.Params))
-	case "pac_custom_delete":
-		writeHTTPJSON(w, http.StatusOK, deleteCustomPAC(configPath, req.Params))
-	case "pac_custom_save":
-		writeHTTPJSON(w, http.StatusOK, saveRenderedPAC(configPath, req.Params))
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, refreshRuleSet(configPath, req.Params)))
 	case "runtime_stats":
 		writeHTTPJSON(w, http.StatusOK, runtimeStats())
 	case "logs":
@@ -685,8 +641,12 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, devices())
 	case "tproxy":
 		writeHTTPJSON(w, http.StatusOK, tproxyStatus(configPath))
+	case "tproxy_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setTProxy(configPath, req.Params)))
 	case "tun":
 		writeHTTPJSON(w, http.StatusOK, tunStatus(configPath))
+	case "tun_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setTUN(configPath, req.Params)))
 	case "start":
 		writeHTTPJSON(w, http.StatusOK, controlRuntime(configPath, runtime.ActionStart))
 	case "stop":
@@ -726,6 +686,32 @@ func setManagerEnabled(configPath string, raw json.RawMessage) map[string]any {
 		return validationResult(false, runtime.Result{}, err)
 	}
 	return map[string]any{"ok": true, "enabled": params.Enabled}
+}
+
+func setManagerMode(configPath string, raw json.RawMessage) map[string]any {
+	var params struct {
+		Mode string `json:"mode"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return validationResult(false, runtime.Result{}, err)
+		}
+	}
+	if err := managerconfig.SetManagerRuntimeMode(configPath, params.Mode); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	return map[string]any{"ok": true, "mode": params.Mode}
+}
+
+func setGroup(configPath string, raw json.RawMessage) map[string]any {
+	group, err := decodeGroup(raw)
+	if err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	if err := managerconfig.SetGroupSettings(configPath, group); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	return map[string]any{"ok": true, "group": group.ID}
 }
 
 func setSubscription(configPath string, raw json.RawMessage) map[string]any {
@@ -917,6 +903,7 @@ func listNodes(configPath string) map[string]any {
 	return map[string]any{
 		"ok":            true,
 		"active_group":  cfg.Manager.ActiveGroup,
+		"group":         cfg.ActiveGroup(),
 		"selected_node": selected,
 		"strategy":      strategy,
 		"nodes":         nodes,
@@ -929,13 +916,6 @@ func listDNS(configPath string) map[string]any {
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	profiles := make([]managerconfig.DNSProfile, 0, len(cfg.DNSProfiles))
-	for _, profile := range cfg.DNSProfiles {
-		profiles = append(profiles, profile)
-	}
-	sort.Slice(profiles, func(i, j int) bool {
-		return profiles[i].ID < profiles[j].ID
-	})
 	servers := make([]managerconfig.DNSServer, 0, len(cfg.DNSServers))
 	for _, server := range cfg.DNSServers {
 		servers = append(servers, server)
@@ -943,29 +923,99 @@ func listDNS(configPath string) map[string]any {
 	sort.Slice(servers, func(i, j int) bool {
 		return servers[i].ID < servers[j].ID
 	})
-	return map[string]any{"ok": true, "profiles": profiles, "servers": servers}
+	rules := make([]managerconfig.DNSRule, 0, len(cfg.DNSRules))
+	for _, rule := range cfg.DNSRules {
+		rules = append(rules, rule)
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		return rules[i].ID < rules[j].ID
+	})
+	dnsFinal := ""
+	if group := cfg.ActiveGroup(); group != nil {
+		dnsFinal = group.DNSFinal
+	}
+	dnsServers, dnsRules, dnsInbound := renderedDNSDebug(*cfg)
+	return map[string]any{
+		"ok":                 true,
+		"active_group":       cfg.Manager.ActiveGroup,
+		"group":              cfg.ActiveGroup(),
+		"dns_final":          dnsFinal,
+		"servers":            servers,
+		"rules":              rules,
+		"capture_enabled":    cfg.TProxy.Enabled && cfg.TProxy.DNSHijack,
+		"warnings":           dnsWarnings(*cfg),
+		"rendered_servers":   dnsServers,
+		"rendered_rules":     dnsRules,
+		"active_dns_inbound": dnsInbound,
+		"devices":            discoverDevices(),
+	}
 }
 
-func setDNSProfile(configPath string, raw json.RawMessage) map[string]any {
-	profile, err := decodeDNSProfile(raw)
+func dnsWarnings(cfg managerconfig.Config) []string {
+	warnings := []string{}
+	if cfg.TProxy.Enabled && cfg.TProxy.DNSHijack && !hasUsableDNSUpstream(cfg) {
+		warnings = append(warnings, "DNS capture is enabled but no DNS server is enabled with a usable address")
+	}
+	return warnings
+}
+
+func hasUsableDNSUpstream(cfg managerconfig.Config) bool {
+	for _, server := range cfg.DNSServers {
+		if server.Enabled && server.Address != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func renderedDNSDebug(cfg managerconfig.Config) ([]map[string]any, []map[string]any, map[string]any) {
+	data, err := render.Render(cfg)
+	if err != nil {
+		return nil, nil, nil
+	}
+	var document struct {
+		DNS *struct {
+			Servers []map[string]any `json:"servers"`
+			Rules   []map[string]any `json:"rules"`
+		} `json:"dns"`
+		Inbounds []map[string]any `json:"inbounds"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		return nil, nil, nil
+	}
+	var inbound map[string]any
+	for _, candidate := range document.Inbounds {
+		if candidate["tag"] == "dns-in" {
+			inbound = candidate
+			break
+		}
+	}
+	if document.DNS == nil {
+		return nil, nil, inbound
+	}
+	return document.DNS.Servers, document.DNS.Rules, inbound
+}
+
+func setDNSRule(configPath string, raw json.RawMessage) map[string]any {
+	rule, err := decodeDNSRule(raw)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	if err := managerconfig.UpsertDNSProfile(configPath, profile); err != nil {
+	if err := managerconfig.UpsertDNSRule(configPath, rule); err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	return map[string]any{"ok": true, "profile": profile.ID}
+	return map[string]any{"ok": true, "rule": rule.ID}
 }
 
-func deleteDNSProfile(configPath string, raw json.RawMessage) map[string]any {
+func deleteDNSRule(configPath string, raw json.RawMessage) map[string]any {
 	params, err := decodeIDParams(raw)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	if err := managerconfig.DeleteDNSProfile(configPath, params.ID); err != nil {
+	if err := managerconfig.DeleteDNSRule(configPath, params.ID); err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	return map[string]any{"ok": true, "profile": params.ID}
+	return map[string]any{"ok": true, "rule": params.ID}
 }
 
 func setDNSServer(configPath string, raw json.RawMessage) map[string]any {
@@ -990,17 +1040,18 @@ func deleteDNSServer(configPath string, raw json.RawMessage) map[string]any {
 	return map[string]any{"ok": true, "server": params.ID}
 }
 
-func listRuleSets(configPath string) map[string]any {
-	cfg, err := managerconfig.Load(configPath)
+func listRouting(configPath string) map[string]any {
+	cfg, err := managerconfig.LoadUnvalidated(configPath)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	profiles := make([]managerconfig.RoutingProfile, 0, len(cfg.Routing))
-	for _, profile := range cfg.Routing {
-		profiles = append(profiles, profile)
+	validationErr := managerconfig.Validate(*cfg)
+	groups := make([]managerconfig.Group, 0, len(cfg.Groups))
+	for _, group := range cfg.Groups {
+		groups = append(groups, group)
 	}
-	sort.Slice(profiles, func(i, j int) bool {
-		return profiles[i].ID < profiles[j].ID
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].ID < groups[j].ID
 	})
 	sets := make([]managerconfig.RuleSet, 0, len(cfg.RuleSets))
 	for _, set := range cfg.RuleSets {
@@ -1012,36 +1063,51 @@ func listRuleSets(configPath string) map[string]any {
 	sort.Slice(sets, func(i, j int) bool {
 		return sets[i].ID < sets[j].ID
 	})
-	sourceRules := make([]managerconfig.SourceRule, 0, len(cfg.SourceRules))
-	for _, rule := range cfg.SourceRules {
-		sourceRules = append(sourceRules, rule)
+	routeRules := make([]managerconfig.RouteRule, 0, len(cfg.RouteRules))
+	for _, rule := range cfg.RouteRules {
+		routeRules = append(routeRules, rule)
 	}
-	sort.Slice(sourceRules, func(i, j int) bool {
-		return sourceRules[i].ID < sourceRules[j].ID
+	sort.Slice(routeRules, func(i, j int) bool {
+		return routeRules[i].ID < routeRules[j].ID
 	})
-	return map[string]any{"ok": true, "profiles": profiles, "rulesets": sets, "source_rules": sourceRules, "devices": discoverDevices()}
+	routeFinal := ""
+	if group := cfg.ActiveGroup(); group != nil {
+		routeFinal = group.RouteFinal
+	}
+	return map[string]any{
+		"ok":           validationErr == nil,
+		"errors":       managerconfig.ErrorStrings(validationErr),
+		"active_group": cfg.Manager.ActiveGroup,
+		"group":        cfg.ActiveGroup(),
+		"runtime_mode": cfg.Manager.RuntimeMode,
+		"route_final":  routeFinal,
+		"groups":       groups,
+		"rulesets":     sets,
+		"route_rules":  routeRules,
+		"devices":      discoverDevices(),
+	}
 }
 
-func setRoutingProfile(configPath string, raw json.RawMessage) map[string]any {
-	profile, err := decodeRoutingProfile(raw)
+func setRouteRule(configPath string, raw json.RawMessage) map[string]any {
+	rule, err := decodeRouteRule(raw)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	if err := managerconfig.UpsertRoutingProfile(configPath, profile); err != nil {
+	if err := managerconfig.UpsertRouteRule(configPath, rule); err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	return map[string]any{"ok": true, "profile": profile.ID}
+	return map[string]any{"ok": true, "rule": rule.ID}
 }
 
-func deleteRoutingProfile(configPath string, raw json.RawMessage) map[string]any {
+func deleteRouteRule(configPath string, raw json.RawMessage) map[string]any {
 	params, err := decodeIDParams(raw)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	if err := managerconfig.DeleteRoutingProfile(configPath, params.ID); err != nil {
+	if err := managerconfig.DeleteRouteRule(configPath, params.ID); err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	return map[string]any{"ok": true, "profile": params.ID}
+	return map[string]any{"ok": true, "rule": params.ID}
 }
 
 func setRuleSet(configPath string, raw json.RawMessage) map[string]any {
@@ -1079,7 +1145,7 @@ func refreshRuleSet(configPath string, raw json.RawMessage) map[string]any {
 	if !ok {
 		return validationResult(false, runtime.Result{}, fmt.Errorf("ruleset %q not found", params.ID))
 	}
-	result, err := ruleset.Download(context.Background(), entry)
+	result, err := ruleset.Download(context.Background(), entry, localProxyAddr(*cfg))
 	if err != nil {
 		_ = managerconfig.MarkRuleSetError(configPath, params.ID, err.Error())
 		return validationResult(false, runtime.Result{}, err)
@@ -1088,118 +1154,6 @@ func refreshRuleSet(configPath string, raw json.RawMessage) map[string]any {
 		return validationResult(false, runtime.Result{}, err)
 	}
 	return map[string]any{"ok": true, "id": result.ID, "path": result.Path, "bytes": result.Bytes}
-}
-
-func setSourceRule(configPath string, raw json.RawMessage) map[string]any {
-	rule, err := decodeSourceRule(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	if err := managerconfig.UpsertSourceRule(configPath, rule); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true, "rule": rule.ID}
-}
-
-func deleteSourceRule(configPath string, raw json.RawMessage) map[string]any {
-	params, err := decodeIDParams(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	if err := managerconfig.DeleteSourceRule(configPath, params.ID); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true, "rule": params.ID}
-}
-
-func pacStatus(configPath string) map[string]any {
-	cfg, err := managerconfig.Load(configPath)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	generated, err := pac.Render(*cfg)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	active, err := pac.RenderActive(*cfg)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	customs := make([]managerconfig.CustomPAC, 0, len(cfg.CustomPACs))
-	for _, entry := range cfg.CustomPACs {
-		customs = append(customs, entry)
-	}
-	sort.Slice(customs, func(i, j int) bool {
-		return customs[i].ID < customs[j].ID
-	})
-	return map[string]any{
-		"ok":                true,
-		"enabled":           cfg.PAC.Enabled,
-		"listen":            cfg.Manager.PACListen,
-		"url":               "http://" + cfg.Manager.PACListen + "/proxy.pac",
-		"source":            cfg.PAC.Source,
-		"selected_custom":   cfg.PAC.SelectedCustom,
-		"local_bypass":      cfg.PAC.LocalBypass,
-		"custom_rules":      cfg.PAC.CustomRules,
-		"whitelist":         cfg.PAC.Whitelist,
-		"blacklist":         cfg.PAC.Blacklist,
-		"custom_pacs":       customs,
-		"preview":           string(active),
-		"generated_preview": string(generated),
-	}
-}
-
-func setPAC(configPath string, raw json.RawMessage) map[string]any {
-	settings, err := decodePACSettings(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	if err := managerconfig.UpdatePAC(configPath, settings); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true}
-}
-
-func setCustomPAC(configPath string, raw json.RawMessage) map[string]any {
-	entry, err := decodeCustomPAC(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	if err := managerconfig.UpsertCustomPAC(configPath, entry); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true, "pac": entry.ID}
-}
-
-func deleteCustomPAC(configPath string, raw json.RawMessage) map[string]any {
-	params, err := decodeIDParams(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	if err := managerconfig.DeleteCustomPAC(configPath, params.ID); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true, "pac": params.ID}
-}
-
-func saveRenderedPAC(configPath string, raw json.RawMessage) map[string]any {
-	entry, err := decodeCustomPAC(raw)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	cfg, err := managerconfig.Load(configPath)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	data, err := pac.Render(*cfg)
-	if err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	entry.Content = string(data)
-	if err := managerconfig.UpsertCustomPAC(configPath, entry); err != nil {
-		return validationResult(false, runtime.Result{}, err)
-	}
-	return map[string]any{"ok": true, "pac": entry.ID}
 }
 
 func runtimeStats() map[string]any {
@@ -1276,6 +1230,44 @@ func tunStatus(configPath string) map[string]any {
 		"inet6_address": cfg.TUN.Inet6Address,
 		"interface":     "singbox0",
 	}
+}
+
+func setTProxy(configPath string, raw json.RawMessage) map[string]any {
+	payload, err := decodeTProxy(raw)
+	if err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	tproxy := managerconfig.TProxy{
+		Enabled:       payload.Enabled,
+		LANIfnames:    payload.LANIfnames,
+		IncludeSubnet: payload.IncludeSubnet,
+		ExcludeSubnet: payload.ExcludeSubnet,
+		IncludeMAC:    payload.IncludeMAC,
+		DNSHijack:     payload.DNSHijack,
+		KillSwitch:    payload.KillSwitch,
+	}
+	if err := managerconfig.UpsertTProxy(configPath, tproxy); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	return map[string]any{"ok": true, "enabled": tproxy.Enabled}
+}
+
+func setTUN(configPath string, raw json.RawMessage) map[string]any {
+	payload, err := decodeTUN(raw)
+	if err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	tun := managerconfig.TUN{
+		Enabled:      payload.Enabled,
+		AutoRoute:    payload.AutoRoute,
+		AutoRedirect: payload.AutoRedirect,
+		Inet4Address: payload.Inet4Address,
+		Inet6Address: payload.Inet6Address,
+	}
+	if err := managerconfig.UpsertTUN(configPath, tun); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	return map[string]any{"ok": true, "enabled": tun.Enabled}
 }
 
 func setNode(configPath string, raw json.RawMessage) map[string]any {
@@ -1497,7 +1489,9 @@ func validateRuntimeConfig(configPath string) map[string]any {
 	}
 
 	result, err := runtime.Validate(*cfg, runtime.DefaultPaths, render.Render)
-	return validationResult(err == nil, result, err)
+	response := validationResult(err == nil, result, err)
+	response["warnings"] = dnsWarnings(*cfg)
+	return response
 }
 
 func controlRuntime(configPath string, action runtime.Action) map[string]any {
@@ -1574,7 +1568,6 @@ func compactConfig(cfg managerconfig.Config) ManagerConfig {
 		LatencyMS:     latency,
 		SocketPath:    cfg.Manager.SocketPath,
 		SingBoxBinary: cfg.Manager.SingBoxBinary,
-		PACListen:     cfg.Manager.PACListen,
 		TProxyEnabled: cfg.TProxy.Enabled,
 		DNSHijack:     cfg.TProxy.DNSHijack,
 		KillSwitch:    cfg.TProxy.KillSwitch,
@@ -1629,6 +1622,51 @@ func collectStatus(cfg ManagerConfig) Status {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// localProxyAddr returns the local mixed-inbound address ("127.0.0.1:port")
+// when sing-box is running, so the daemon can route its own outbound HTTP
+// (e.g. rule-set downloads) through the tunnel. Empty means "go direct".
+func localProxyAddr(cfg managerconfig.Config) string {
+	if managedRuntimePID(runtime.DefaultPaths) == 0 {
+		return ""
+	}
+	if cfg.Manager.MixedPort <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("127.0.0.1:%d", cfg.Manager.MixedPort)
+}
+
+// applyMutation reloads the running sing-box so a just-saved config change
+// takes effect immediately. It is a no-op when the change failed or nothing is
+// running, and it never turns a successful save into a failure: reload trouble
+// is reported via the "reloaded"/"reload_error" fields, not "ok".
+func applyMutation(configPath string, response map[string]any) map[string]any {
+	if response == nil {
+		return response
+	}
+	if ok, _ := response["ok"].(bool); !ok {
+		return response
+	}
+	if managedRuntimePID(runtime.DefaultPaths) == 0 {
+		response["reloaded"] = false
+		return response
+	}
+	cfg, err := managerconfig.Load(configPath)
+	if err != nil {
+		log.Printf("auto-reload skipped: %v", err)
+		response["reloaded"] = false
+		response["reload_error"] = err.Error()
+		return response
+	}
+	if _, err := runtime.Control(*cfg, runtime.ActionReload, runtime.DefaultPaths, render.Render); err != nil {
+		log.Printf("auto-reload after config change failed: %v", err)
+		response["reloaded"] = false
+		response["reload_error"] = err.Error()
+		return response
+	}
+	response["reloaded"] = true
+	return response
 }
 
 func statusUnavailable(cfg ManagerConfig, err error) Status {
@@ -1936,19 +1974,34 @@ func decodeNode(raw json.RawMessage) (managerconfig.Node, error) {
 	return nodeFromPayload(payload), nil
 }
 
-func decodeDNSProfile(raw json.RawMessage) (managerconfig.DNSProfile, error) {
+func decodeGroup(raw json.RawMessage) (managerconfig.Group, error) {
 	var envelope struct {
-		Profile *DNSProfilePayload `json:"profile"`
+		Group *GroupPayload `json:"group"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Profile != nil {
-		return dnsProfileFromPayload(*envelope.Profile), nil
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Group != nil {
+		return groupFromPayload(*envelope.Group), nil
 	}
 
-	var payload DNSProfilePayload
+	var payload GroupPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return managerconfig.DNSProfile{}, err
+		return managerconfig.Group{}, err
 	}
-	return dnsProfileFromPayload(payload), nil
+	return groupFromPayload(payload), nil
+}
+
+func decodeDNSRule(raw json.RawMessage) (managerconfig.DNSRule, error) {
+	var envelope struct {
+		Rule *DNSRulePayload `json:"rule"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Rule != nil {
+		return dnsRuleFromPayload(*envelope.Rule), nil
+	}
+
+	var payload DNSRulePayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return managerconfig.DNSRule{}, err
+	}
+	return dnsRuleFromPayload(payload), nil
 }
 
 func decodeDNSServer(raw json.RawMessage) (managerconfig.DNSServer, error) {
@@ -1966,19 +2019,19 @@ func decodeDNSServer(raw json.RawMessage) (managerconfig.DNSServer, error) {
 	return dnsServerFromPayload(payload), nil
 }
 
-func decodeRoutingProfile(raw json.RawMessage) (managerconfig.RoutingProfile, error) {
+func decodeRouteRule(raw json.RawMessage) (managerconfig.RouteRule, error) {
 	var envelope struct {
-		Profile *RoutingProfilePayload `json:"profile"`
+		Rule *RouteRulePayload `json:"rule"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Profile != nil {
-		return routingProfileFromPayload(*envelope.Profile), nil
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Rule != nil {
+		return routeRuleFromPayload(*envelope.Rule), nil
 	}
 
-	var payload RoutingProfilePayload
+	var payload RouteRulePayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return managerconfig.RoutingProfile{}, err
+		return managerconfig.RouteRule{}, err
 	}
-	return routingProfileFromPayload(payload), nil
+	return routeRuleFromPayload(payload), nil
 }
 
 func decodeRuleSet(raw json.RawMessage) (managerconfig.RuleSet, error) {
@@ -1996,49 +2049,32 @@ func decodeRuleSet(raw json.RawMessage) (managerconfig.RuleSet, error) {
 	return ruleSetFromPayload(payload), nil
 }
 
-func decodeSourceRule(raw json.RawMessage) (managerconfig.SourceRule, error) {
+func decodeTProxy(raw json.RawMessage) (TProxyPayload, error) {
 	var envelope struct {
-		Rule *SourceRulePayload `json:"rule"`
+		TProxy *TProxyPayload `json:"tproxy"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Rule != nil {
-		return sourceRuleFromPayload(*envelope.Rule), nil
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.TProxy != nil {
+		return *envelope.TProxy, nil
 	}
-
-	var payload SourceRulePayload
+	var payload TProxyPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return managerconfig.SourceRule{}, err
+		return TProxyPayload{}, err
 	}
-	return sourceRuleFromPayload(payload), nil
+	return payload, nil
 }
 
-func decodePACSettings(raw json.RawMessage) (managerconfig.PAC, error) {
+func decodeTUN(raw json.RawMessage) (TUNPayload, error) {
 	var envelope struct {
-		PAC *PACSettingsPayload `json:"pac"`
+		TUN *TUNPayload `json:"tun"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.PAC != nil {
-		return pacFromPayload(*envelope.PAC), nil
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.TUN != nil {
+		return *envelope.TUN, nil
 	}
-
-	var payload PACSettingsPayload
+	var payload TUNPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return managerconfig.PAC{}, err
+		return TUNPayload{}, err
 	}
-	return pacFromPayload(payload), nil
-}
-
-func decodeCustomPAC(raw json.RawMessage) (managerconfig.CustomPAC, error) {
-	var envelope struct {
-		PAC *CustomPACPayload `json:"pac"`
-	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.PAC != nil {
-		return customPACFromPayload(*envelope.PAC), nil
-	}
-
-	var payload CustomPACPayload
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return managerconfig.CustomPAC{}, err
-	}
-	return customPACFromPayload(payload), nil
+	return payload, nil
 }
 
 func isRemoteSubscriptionInput(input string) bool {
@@ -2148,22 +2184,31 @@ func nodeFromPayload(payload NodePayload) managerconfig.Node {
 	}
 }
 
-func dnsProfileFromPayload(payload DNSProfilePayload) managerconfig.DNSProfile {
+func groupFromPayload(payload GroupPayload) managerconfig.Group {
+	return managerconfig.Group{
+		ID:            payload.ID,
+		Name:          firstNonEmpty(payload.Name, payload.ID),
+		Strategy:      payload.Strategy,
+		RouteFinal:    payload.RouteFinal,
+		DNSFinal:      payload.DNSFinal,
+		SelectedNode:  payload.SelectedNode,
+		Subscriptions: payload.Subscriptions,
+	}
+}
+
+func dnsRuleFromPayload(payload DNSRulePayload) managerconfig.DNSRule {
 	enabled := true
 	if payload.Enabled != nil {
 		enabled = *payload.Enabled
 	}
-	name := payload.Name
-	if name == "" {
-		name = payload.ID
-	}
-	return managerconfig.DNSProfile{
-		ID:      payload.ID,
-		Enabled: enabled,
-		Name:    name,
-		Mode:    payload.Mode,
-		Servers: payload.Servers,
-		Hijack:  payload.Hijack,
+	return managerconfig.DNSRule{
+		ID:       payload.ID,
+		Enabled:  enabled,
+		Name:     firstNonEmpty(payload.Name, payload.ID),
+		Group:    payload.Group,
+		Sources:  payload.Sources,
+		RuleSets: payload.RuleSets,
+		Server:   payload.Server,
 	}
 }
 
@@ -2186,22 +2231,19 @@ func dnsServerFromPayload(payload DNSServerPayload) managerconfig.DNSServer {
 	}
 }
 
-func routingProfileFromPayload(payload RoutingProfilePayload) managerconfig.RoutingProfile {
+func routeRuleFromPayload(payload RouteRulePayload) managerconfig.RouteRule {
 	enabled := true
 	if payload.Enabled != nil {
 		enabled = *payload.Enabled
 	}
-	name := payload.Name
-	if name == "" {
-		name = payload.ID
-	}
-	return managerconfig.RoutingProfile{
+	return managerconfig.RouteRule{
 		ID:       payload.ID,
 		Enabled:  enabled,
-		Name:     name,
-		Mode:     payload.Mode,
+		Name:     firstNonEmpty(payload.Name, payload.ID),
+		Group:    payload.Group,
+		Sources:  payload.Sources,
 		RuleSets: payload.RuleSets,
-		Final:    payload.Final,
+		Outbound: payload.Outbound,
 	}
 }
 
@@ -2223,62 +2265,6 @@ func ruleSetFromPayload(payload RuleSetPayload) managerconfig.RuleSet {
 		URL:            payload.URL,
 		Path:           payload.Path,
 		UpdateInterval: payload.UpdateInterval,
-	}
-}
-
-func sourceRuleFromPayload(payload SourceRulePayload) managerconfig.SourceRule {
-	enabled := true
-	if payload.Enabled != nil {
-		enabled = *payload.Enabled
-	}
-	name := payload.Name
-	if name == "" {
-		name = payload.ID
-	}
-	return managerconfig.SourceRule{
-		ID:       payload.ID,
-		Enabled:  enabled,
-		Name:     name,
-		Profile:  payload.Profile,
-		Sources:  payload.Sources,
-		Outbound: payload.Outbound,
-	}
-}
-
-func pacFromPayload(payload PACSettingsPayload) managerconfig.PAC {
-	enabled := false
-	if payload.Enabled != nil {
-		enabled = *payload.Enabled
-	}
-	localBypass := true
-	if payload.LocalBypass != nil {
-		localBypass = *payload.LocalBypass
-	}
-	return managerconfig.PAC{
-		Enabled:        enabled,
-		Source:         payload.Source,
-		SelectedCustom: payload.SelectedCustom,
-		LocalBypass:    localBypass,
-		CustomRules:    payload.CustomRules,
-		Whitelist:      payload.Whitelist,
-		Blacklist:      payload.Blacklist,
-	}
-}
-
-func customPACFromPayload(payload CustomPACPayload) managerconfig.CustomPAC {
-	enabled := true
-	if payload.Enabled != nil {
-		enabled = *payload.Enabled
-	}
-	name := payload.Name
-	if name == "" {
-		name = payload.ID
-	}
-	return managerconfig.CustomPAC{
-		ID:      payload.ID,
-		Enabled: enabled,
-		Name:    name,
-		Content: payload.Content,
 	}
 }
 

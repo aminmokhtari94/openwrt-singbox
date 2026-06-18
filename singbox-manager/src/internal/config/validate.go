@@ -39,9 +39,6 @@ func Validate(cfg Config) error {
 	if cfg.Manager.SocketPath == "" {
 		errors = append(errors, "manager.main.socket_path is required")
 	}
-	if cfg.PAC.Enabled && cfg.Manager.PACListen == "" {
-		errors = append(errors, "manager.main.pac_listen is required when pac is enabled")
-	}
 	if !inSet(cfg.Manager.RuntimeMode, "direct", "rule", "global") {
 		errors = append(errors, fmt.Sprintf("manager.main.runtime_mode must be direct, rule, or global, got %q", cfg.Manager.RuntimeMode))
 	}
@@ -53,14 +50,15 @@ func Validate(cfg Config) error {
 		if group.Name == "" {
 			errors = append(errors, fmt.Sprintf("group.%s.name is required", id))
 		}
-		if group.RoutingProfile != "" {
-			if _, ok := cfg.Routing[group.RoutingProfile]; !ok {
-				errors = append(errors, fmt.Sprintf("group.%s.routing_profile references missing profile %q", id, group.RoutingProfile))
-			}
+		if !inSet(group.Strategy, "manual", "selector", "urltest", "load-balance") {
+			errors = append(errors, fmt.Sprintf("group.%s.strategy is unsupported: %q", id, group.Strategy))
 		}
-		if group.DNSProfile != "" {
-			if _, ok := cfg.DNSProfiles[group.DNSProfile]; !ok {
-				errors = append(errors, fmt.Sprintf("group.%s.dns_profile references missing profile %q", id, group.DNSProfile))
+		if !inSet(group.RouteFinal, "direct", "proxy", "block") {
+			errors = append(errors, fmt.Sprintf("group.%s.route_final must be direct, proxy, or block, got %q", id, group.RouteFinal))
+		}
+		if group.DNSFinal != "" {
+			if _, ok := cfg.DNSServers[group.DNSFinal]; !ok {
+				errors = append(errors, fmt.Sprintf("group.%s.dns_final references missing dns_server %q", id, group.DNSFinal))
 			}
 		}
 		if group.SelectedNode != "" {
@@ -72,9 +70,6 @@ func Validate(cfg Config) error {
 			if _, ok := cfg.Subscriptions[subscriptionID]; !ok {
 				errors = append(errors, fmt.Sprintf("group.%s.subscription references missing subscription %q", id, subscriptionID))
 			}
-		}
-		if !inSet(group.Strategy, "manual", "selector", "urltest", "load-balance") {
-			errors = append(errors, fmt.Sprintf("group.%s.strategy is unsupported: %q", id, group.Strategy))
 		}
 	}
 
@@ -122,53 +117,6 @@ func Validate(cfg Config) error {
 		}
 	}
 
-	for id, profile := range cfg.Routing {
-		if !inSet(profile.Mode, "direct", "rule", "global") {
-			errors = append(errors, fmt.Sprintf("routing_profile.%s.mode is unsupported: %q", id, profile.Mode))
-		}
-		if !inSet(profile.Final, "direct", "proxy", "block") {
-			errors = append(errors, fmt.Sprintf("routing_profile.%s.final is unsupported: %q", id, profile.Final))
-		}
-		for _, rulesetID := range profile.RuleSets {
-			if _, ok := cfg.RuleSets[rulesetID]; !ok {
-				errors = append(errors, fmt.Sprintf("routing_profile.%s.ruleset references missing ruleset %q", id, rulesetID))
-			}
-		}
-	}
-
-	for id, rule := range cfg.SourceRules {
-		if rule.Profile == "" {
-			errors = append(errors, fmt.Sprintf("source_rule.%s.profile is required", id))
-		} else if _, ok := cfg.Routing[rule.Profile]; !ok {
-			errors = append(errors, fmt.Sprintf("source_rule.%s.profile references missing profile %q", id, rule.Profile))
-		}
-		if len(rule.Sources) == 0 {
-			errors = append(errors, fmt.Sprintf("source_rule.%s.source_ip is required", id))
-		}
-		for _, source := range rule.Sources {
-			if _, err := netip.ParseAddr(source); err == nil {
-				continue
-			}
-			if _, err := netip.ParsePrefix(source); err != nil {
-				errors = append(errors, fmt.Sprintf("source_rule.%s.source_ip is invalid: %q", id, source))
-			}
-		}
-		if !inSet(rule.Outbound, "direct", "proxy", "block", "dns") {
-			errors = append(errors, fmt.Sprintf("source_rule.%s.outbound must be direct, proxy, block, or dns, got %q", id, rule.Outbound))
-		}
-	}
-
-	for id, profile := range cfg.DNSProfiles {
-		if !inSet(profile.Mode, "direct", "proxy", "split") {
-			errors = append(errors, fmt.Sprintf("dns_profile.%s.mode is unsupported: %q", id, profile.Mode))
-		}
-		for _, serverID := range profile.Servers {
-			if _, ok := cfg.DNSServers[serverID]; !ok {
-				errors = append(errors, fmt.Sprintf("dns_profile.%s.server references missing dns_server %q", id, serverID))
-			}
-		}
-	}
-
 	for id, server := range cfg.DNSServers {
 		if server.Enabled && server.Address == "" {
 			errors = append(errors, fmt.Sprintf("dns_server.%s.address is required when enabled", id))
@@ -179,6 +127,32 @@ func Validate(cfg Config) error {
 		if server.Detour != "" && !inSet(server.Detour, "direct", "proxy") {
 			errors = append(errors, fmt.Sprintf("dns_server.%s.detour must be direct or proxy, got %q", id, server.Detour))
 		}
+	}
+
+	for id, rule := range cfg.DNSRules {
+		validateRuleGroup(&errors, "dns_rule", id, rule.Group, cfg)
+		if rule.Server == "" {
+			errors = append(errors, fmt.Sprintf("dns_rule.%s.server is required", id))
+		} else if _, ok := cfg.DNSServers[rule.Server]; !ok {
+			errors = append(errors, fmt.Sprintf("dns_rule.%s.server references missing dns_server %q", id, rule.Server))
+		}
+		if len(rule.Sources) == 0 && len(rule.RuleSets) == 0 {
+			errors = append(errors, fmt.Sprintf("dns_rule.%s needs at least one source_ip or ruleset", id))
+		}
+		validateSourceCIDRs(&errors, "dns_rule", id, rule.Sources)
+		validateRuleSetRefs(&errors, "dns_rule", id, rule.RuleSets, cfg)
+	}
+
+	for id, rule := range cfg.RouteRules {
+		validateRuleGroup(&errors, "route_rule", id, rule.Group, cfg)
+		if !inSet(rule.Outbound, "direct", "proxy", "block") {
+			errors = append(errors, fmt.Sprintf("route_rule.%s.outbound must be direct, proxy, or block, got %q", id, rule.Outbound))
+		}
+		if len(rule.Sources) == 0 && len(rule.RuleSets) == 0 {
+			errors = append(errors, fmt.Sprintf("route_rule.%s needs at least one source_ip or ruleset", id))
+		}
+		validateSourceCIDRs(&errors, "route_rule", id, rule.Sources)
+		validateRuleSetRefs(&errors, "route_rule", id, rule.RuleSets, cfg)
 	}
 
 	for id, ruleset := range cfg.RuleSets {
@@ -193,28 +167,6 @@ func Validate(cfg Config) error {
 		}
 		if ruleset.Enabled && ruleset.Type == "remote" && ruleset.URL == "" && ruleset.Path == "" {
 			errors = append(errors, fmt.Sprintf("ruleset.%s needs url or path when enabled", id))
-		}
-	}
-
-	for _, rule := range cfg.PAC.CustomRules {
-		if parsePACRulePattern(rule) == "" {
-			errors = append(errors, fmt.Sprintf("pac.main.custom_rule is invalid: %q", rule))
-		}
-	}
-	if !inSet(cfg.PAC.Source, "generated", "custom") {
-		errors = append(errors, fmt.Sprintf("pac.main.source must be generated or custom, got %q", cfg.PAC.Source))
-	}
-	if cfg.PAC.Source == "custom" {
-		custom, ok := cfg.CustomPACs[cfg.PAC.SelectedCustom]
-		if cfg.PAC.SelectedCustom == "" || !ok {
-			errors = append(errors, fmt.Sprintf("pac.main.selected_custom references missing custom PAC %q", cfg.PAC.SelectedCustom))
-		} else if !custom.Enabled {
-			errors = append(errors, fmt.Sprintf("pac.main.selected_custom references disabled custom PAC %q", cfg.PAC.SelectedCustom))
-		}
-	}
-	for id, pac := range cfg.CustomPACs {
-		if pac.Content == "" {
-			errors = append(errors, fmt.Sprintf("pac_custom.%s.content is required", id))
 		}
 	}
 
@@ -264,6 +216,35 @@ func Validate(cfg Config) error {
 	return nil
 }
 
+func validateRuleGroup(errors *[]string, kind string, id string, groupID string, cfg Config) {
+	if groupID == "" {
+		*errors = append(*errors, fmt.Sprintf("%s.%s.group is required", kind, id))
+		return
+	}
+	if _, ok := cfg.Groups[groupID]; !ok {
+		*errors = append(*errors, fmt.Sprintf("%s.%s.group references missing group %q", kind, id, groupID))
+	}
+}
+
+func validateSourceCIDRs(errors *[]string, kind string, id string, sources []string) {
+	for _, source := range sources {
+		if _, err := netip.ParseAddr(source); err == nil {
+			continue
+		}
+		if _, err := netip.ParsePrefix(source); err != nil {
+			*errors = append(*errors, fmt.Sprintf("%s.%s.source_ip is invalid: %q", kind, id, source))
+		}
+	}
+}
+
+func validateRuleSetRefs(errors *[]string, kind string, id string, rulesets []string, cfg Config) {
+	for _, rulesetID := range rulesets {
+		if _, ok := cfg.RuleSets[rulesetID]; !ok {
+			*errors = append(*errors, fmt.Sprintf("%s.%s.ruleset references missing ruleset %q", kind, id, rulesetID))
+		}
+	}
+}
+
 func inSet(value string, allowed ...string) bool {
 	for _, candidate := range allowed {
 		if value == candidate {
@@ -271,28 +252,6 @@ func inSet(value string, allowed ...string) bool {
 		}
 	}
 	return false
-}
-
-func parsePACRulePattern(rule string) string {
-	rule = strings.TrimSpace(rule)
-	if rule == "" {
-		return ""
-	}
-	if strings.Contains(rule, ",") {
-		parts := strings.SplitN(rule, ",", 2)
-		return strings.TrimSpace(parts[0])
-	}
-	fields := strings.Fields(rule)
-	if len(fields) == 0 {
-		return ""
-	}
-	if len(fields) == 1 {
-		return fields[0]
-	}
-	if inSet(strings.ToLower(fields[0]), "direct", "proxy", "block", "reject") {
-		return strings.Join(fields[1:], " ")
-	}
-	return fields[0]
 }
 
 func firstNonEmpty(values ...string) string {
