@@ -15,10 +15,20 @@ DAEMON_OUT ?= /tmp/singbox-managerd
 # different device, or use the `ipk-<arch>` presets further down.
 # ---------------------------------------------------------------------------
 OPENWRT_VERSION ?= 25.12.4
+# Release series (major.minor) derived from OPENWRT_VERSION, e.g. 24.10.7 -> 24.10.
+# Selects the toolchain version below and names the per-series package feed.
+OPENWRT_SERIES := $(word 1,$(subst ., ,$(OPENWRT_VERSION))).$(word 2,$(subst ., ,$(OPENWRT_VERSION)))
 OPENWRT_TARGET_PATH ?= x86/64
 OPENWRT_TARGET_DASH ?= $(subst /,-,$(OPENWRT_TARGET_PATH))
 OPENWRT_PROFILE ?= generic-ext4-combined
-OPENWRT_GCC_VERSION ?= 14.3.0
+
+# GCC toolchain version per OpenWrt release series — embedded in the SDK archive
+# filename, so it must match the targeted release. Add a line for a new series,
+# or override OPENWRT_GCC_VERSION directly for an unlisted one.
+OPENWRT_GCC_VERSION_24.10 := 13.3.0
+OPENWRT_GCC_VERSION_25.12 := 14.3.0
+OPENWRT_GCC_VERSION ?= $(OPENWRT_GCC_VERSION_$(OPENWRT_SERIES))
+
 OPENWRT_SDK_HOST ?= Linux-x86_64
 OPENWRT_SDK_FEEDS ?= base packages luci
 OPENWRT_SDK_FEED_PACKAGES ?= golang luci sing-box
@@ -58,6 +68,12 @@ OPENWRT_SDK_PACKAGE_DIR = $(OPENWRT_SDK)/package/openwrt-singbox
 OPENWRT_SDK_GOLANG_PACKAGE_MK = $(OPENWRT_SDK)/feeds/packages/lang/golang/golang-package.mk
 OPENWRT_SDK_LUCI_MK = $(OPENWRT_SDK)/feeds/luci/luci.mk
 OPENWRT_SDK_SING_BOX_MAKEFILE = $(OPENWRT_SDK)/package/feeds/packages/sing-box/Makefile
+# The base feed's build config lives under feeds/base_root (25.12+) or feeds/base
+# (24.10). Resolve whichever exists — expanded at recipe time, after feeds are
+# installed, so the directory is present by the time it is read.
+OPENWRT_SDK_BASE_CONFIG = $(firstword $(wildcard \
+	$(OPENWRT_SDK)/feeds/base_root/config/Config-build.in \
+	$(OPENWRT_SDK)/feeds/base/config/Config-build.in))
 
 # ---------------------------------------------------------------------------
 # OpenWrt test VM (x86 only) and isolated lab network
@@ -115,7 +131,7 @@ IPKS ?= $(OPENWRT_PACKAGES)
 # Note: the per-arch ipk-<arch> targets are intentionally NOT phony — declaring
 # them phony excludes them from the ipk-% pattern rule's implicit-rule search.
 .PHONY: help test build smoke sdk ensure-sdk sdk-check sdk-link \
-	ipk build-ipk ipk-all \
+	ipk build-ipk ipk-all apk-index \
 	vm-image vm-net-up vm-net-down vm-run vm-ssh \
 	alpine-iso alpine-run proxy-test-help deploy undeploy vm-clean
 
@@ -128,6 +144,7 @@ help:
 		'  make ipk        Build packages for OPENWRT_TARGET_PATH=$(OPENWRT_TARGET_PATH) into IPK_DIR=$(IPK_DIR)' \
 		'  make ipk-<arch> Build packages for one arch ($(ARCHS)) into dist/<arch>' \
 		'  make ipk-all    Build packages for every arch in ARCHS' \
+		'  make apk-index-<arch> Build signed packages.adb feed index (APK_SIGN_KEY=<ec-key>)' \
 		'  make smoke      Run local rpcd smoke checks' \
 		'  make vm-image   Download OpenWrt image and create qcow2 overlay' \
 		'  make vm-run     Boot OpenWrt VM on isolated lab LAN and host-NAT WAN' \
@@ -158,6 +175,7 @@ $(SDK_DIR):
 	mkdir -p $@
 
 $(OPENWRT_SDK_ARCHIVE): | $(SDK_DIR)
+	@test -n "$(OPENWRT_GCC_VERSION)" || { echo "No GCC version known for OpenWrt series '$(OPENWRT_SERIES)' (from OPENWRT_VERSION=$(OPENWRT_VERSION)). Set OPENWRT_GCC_VERSION=<x.y.z> or add OPENWRT_GCC_VERSION_$(OPENWRT_SERIES) in the Makefile."; exit 1; }
 	wget -O $@ $(OPENWRT_BASE_URL)/$(OPENWRT_SDK_NAME).tar.zst
 
 ifeq ($(OPENWRT_SDK_ABSPATH),$(DEFAULT_OPENWRT_SDK_ABSPATH))
@@ -223,6 +241,7 @@ define sdk_config_reset
 endef
 
 ipk build-ipk: sdk-link
+	@test -n "$(OPENWRT_SDK_BASE_CONFIG)" || { echo "No base-feed Config-build.in under $(OPENWRT_SDK)/feeds (looked for base_root/ and base/)"; exit 1; }
 	sed -i \
 		-e '/^config TARGET_MULTI_PROFILE$$/,/^config TARGET_ALL_PROFILES$$/s/^\([[:space:]]*\)default y/\1default n/' \
 		-e '/^config TARGET_ALL_PROFILES$$/,/^config TARGET_PER_DEVICE_ROOTFS$$/s/^\([[:space:]]*\)default y/\1default n/' \
@@ -234,7 +253,7 @@ ipk build-ipk: sdk-link
 		-e '/^config ALL_KMODS$$/,/^config ALL$$/s/^\([[:space:]]*\)default y/\1default n/' \
 		-e '/^config BUILDBOT$$/,/^config SIGNATURE_CHECK$$/s/^\([[:space:]]*\)default y/\1default n/' \
 		"$(OPENWRT_SDK)/Config-build.in" \
-		"$(OPENWRT_SDK)/feeds/base_root/config/Config-build.in"
+		"$(OPENWRT_SDK_BASE_CONFIG)"
 	perl -0pi -e 's/(^config (?:DEFAULT_|MODULE_DEFAULT_|PACKAGE_)[^\n]*\n(?:(?!^config ).*\n)*?\h*default )[ym]\b/$${1}n/gm' \
 		"$(OPENWRT_SDK)/Config-build.in"
 	$(sdk_config_reset)
@@ -271,6 +290,57 @@ ipk-all:
 ipk-%:
 	@test -n "$(TARGET_PATH_$*)" || { echo "Unknown arch '$*'. Known: $(ARCHS) (or set TARGET_PATH_$*=<target/subtarget>)"; exit 1; }
 	$(MAKE) ipk OPENWRT_TARGET_PATH="$(TARGET_PATH_$*)" OPENWRT_LIBC="$(or $(LIBC_$*),musl)" IPK_DIR="$(IPK_DIR)/$*"
+
+# ---------------------------------------------------------------------------
+# apk feed index (packages.adb)
+#
+# OpenWrt 25.12+ apk clients (apk-tools 3) read a binary `packages.adb` index
+# built with `apk mkndx` — NOT Alpine's legacy `apk index`/APKINDEX.tar.gz. Use
+# the SDK's own host apk so the index format matches the packages exactly.
+#
+# Signing: when APK_SIGN_KEY points at an EC private key, the index is signed.
+# apk embeds the key file's *basename* as the signer name, so clients must
+# install the matching public key at /etc/apk/keys/<basename>. With no key the
+# index is unsigned and clients need `apk --allow-untrusted`.
+#
+# `apk-index-<arch>` resolves the same per-arch SDK as `ipk-<arch>`, so run it
+# after the matching `ipk-<arch>` build. It no-ops for opkg/.ipk releases
+# (24.10), which have no .apk to index. It also writes `<IPK_DIR>/apk-arch` with
+# the real OpenWrt package arch (e.g. mipsel_24kc) — the value a device reports
+# as `cat /etc/apk/arch` — so the published feed dir can be named to match and
+# clients can auto-select it.
+# ---------------------------------------------------------------------------
+APK_HOST_BIN = $(OPENWRT_SDK)/staging_dir/host/bin/apk
+
+apk-index:
+	@idx_dir="$(IPK_DIR)"; \
+	if [ -z "$$(find "$$idx_dir" -maxdepth 1 -name '*.apk' -print -quit 2>/dev/null)" ]; then \
+		echo "No .apk in $$idx_dir (opkg/.ipk release?); skipping apk index"; \
+		exit 0; \
+	fi; \
+	apk_bin="$(abspath $(APK_HOST_BIN))"; \
+	[ -x "$$apk_bin" ] || apk_bin="$$(find "$(abspath $(OPENWRT_SDK))" -path '*/staging_dir/host/bin/apk' -type f 2>/dev/null | head -1)"; \
+	[ -n "$$apk_bin" ] && [ -x "$$apk_bin" ] || { echo "SDK host apk (apk-tools 3) not found under $(OPENWRT_SDK); build packages first"; exit 1; }; \
+	sign_args=""; \
+	if [ -n "$(APK_SIGN_KEY)" ]; then \
+		test -f "$(APK_SIGN_KEY)" || { echo "APK_SIGN_KEY is not a file: $(APK_SIGN_KEY)"; exit 1; }; \
+		sign_args="--sign-key $(abspath $(APK_SIGN_KEY))"; \
+		echo "Signing $$idx_dir/packages.adb with key $(notdir $(APK_SIGN_KEY))"; \
+	else \
+		echo "APK_SIGN_KEY empty; building UNSIGNED $$idx_dir/packages.adb"; \
+	fi; \
+	( cd "$$idx_dir" && "$$apk_bin" mkndx --allow-untrusted $$sign_args --output packages.adb *.apk ); \
+	echo "Wrote $$idx_dir/packages.adb"; \
+	sample="$$(find "$(abspath $(OPENWRT_SDK))/bin/packages" -name 'singbox-manager-*.apk' -print -quit 2>/dev/null)"; \
+	apk_arch="$$([ -n "$$sample" ] && basename "$$(dirname "$$(dirname "$$sample")")")"; \
+	[ -n "$$apk_arch" ] || { echo "Could not determine apk arch from $(OPENWRT_SDK)/bin/packages"; exit 1; }; \
+	printf '%s\n' "$$apk_arch" > "$$idx_dir/apk-arch"; \
+	echo "Feed arch: $$apk_arch (-> $$idx_dir/apk-arch; matches the device's \`cat /etc/apk/arch\`)"
+
+# Build the apk index for a single arch preset, e.g. `make apk-index-aarch64`.
+apk-index-%:
+	@test -n "$(TARGET_PATH_$*)" || { echo "Unknown arch '$*'. Known: $(ARCHS) (or set TARGET_PATH_$*=<target/subtarget>)"; exit 1; }
+	$(MAKE) apk-index OPENWRT_TARGET_PATH="$(TARGET_PATH_$*)" OPENWRT_LIBC="$(or $(LIBC_$*),musl)" IPK_DIR="$(IPK_DIR)/$*"
 
 # ---------------------------------------------------------------------------
 # OpenWrt test VM

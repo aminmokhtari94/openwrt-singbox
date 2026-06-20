@@ -8,15 +8,23 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build:
-    name: Build (${{ matrix.arch }})
+    name: Build (${{ matrix.release.series }} ${{ matrix.arch }})
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
+        # OpenWrt 25.12 ships apk/.apk; 24.10 ships opkg/.ipk. The SDK for each
+        # release emits whichever format that release uses — the same package
+        # sources build cleanly against both.
+        release:
+          - { version: "24.10.7", series: "24.10" }
+          - { version: "25.12.4", series: "25.12" }
         arch: [x86_64, aarch64, armv7, mipsel]
     steps:
       - uses: actions/checkout@v4
@@ -31,18 +39,36 @@ jobs:
             rsync swig unzip zlib1g-dev file wget zstd
 
       - name: Build packages
-        run: make ipk-${{ matrix.arch }}
+        run: make ipk-${{ matrix.arch }} OPENWRT_VERSION=${{ matrix.release.version }}
+
+      - name: Build signed apk feed index (packages.adb)
+        env:
+          APK_SIGN_KEY: ${{ secrets.APK_SIGN_KEY }}
+        run: |
+          # No-op for opkg/.ipk releases (24.10); builds packages.adb for apk
+          # releases (25.12+). The key file's basename is embedded as the signer
+          # name, so it MUST match the public key clients trust
+          # (/etc/apk/keys/openwrt-singbox.pem). A fork without the secret gets an
+          # unsigned index instead of a failed build.
+          key_arg=
+          if [ -n "$APK_SIGN_KEY" ]; then
+            printf '%s\n' "$APK_SIGN_KEY" > "$RUNNER_TEMP/openwrt-singbox.pem"
+            key_arg="APK_SIGN_KEY=$RUNNER_TEMP/openwrt-singbox.pem"
+          else
+            echo "::warning::APK_SIGN_KEY secret not set — apk feed index will be UNSIGNED"
+          fi
+          make apk-index-${{ matrix.arch }} OPENWRT_VERSION=${{ matrix.release.version }} $key_arg
 
       - name: Collect artifacts
         run: |
           mkdir -p out
-          find "dist/${{ matrix.arch }}" -type f \( -name '*.ipk' -o -name '*.apk' \) \
+          find "dist/${{ matrix.arch }}" -type f \( -name '*.ipk' -o -name '*.apk' -o -name 'packages.adb' -o -name 'apk-arch' \) \
             -exec cp -v {} out/ \;
           ls -l out
 
       - uses: actions/upload-artifact@v4
         with:
-          name: packages-${{ matrix.arch }}
+          name: packages-${{ matrix.release.series }}-${{ matrix.arch }}
           path: out/*
           if-no-files-found: error
 
@@ -62,23 +88,24 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p assets
-          # Artifacts land in artifacts/packages-<arch>/. The daemon package
-          # filename does not encode the arch, so suffix it to avoid collisions
-          # across arches. The luci-app is architecture-independent (PKGARCH:=all)
-          # so a single copy is shipped.
+          # Artifacts land in artifacts/packages-<series>-<arch>/ (e.g.
+          # packages-24.10-armv7). 25.12 ships .apk, 24.10 ships .ipk. The daemon
+          # apk filename does not encode the arch and the luci-app filename encodes
+          # neither arch nor series, so rename to canonical, collision-free names.
           for d in artifacts/packages-*; do
             [ -d "$d" ] || continue
-            arch="${d##*/packages-}"
-            for f in "$d"/singbox-manager-*.apk "$d"/singbox-manager-*.ipk \
-                     "$d"/singbox-manager_*.ipk; do
+            name="${d##*/packages-}"; series="${name%-*}"; arch="${name##*-}"
+            for f in "$d"/singbox-manager-*.apk "$d"/singbox-manager_*.ipk; do
               [ -e "$f" ] || continue
-              base="$(basename "$f")"; ext="${base##*.}"
-              cp -v "$f" "assets/${base%.*}_${arch}.${ext}"
+              cp -v "$f" "assets/singbox-manager_${series}_${arch}.${f##*.}"
+            done
+            # The luci-app is architecture-independent (PKGARCH:=all); ship one
+            # copy per release series.
+            for f in "$d"/luci-app-singbox-manager-*.apk "$d"/luci-app-singbox-manager_*.ipk; do
+              [ -e "$f" ] || continue
+              cp -vn "$f" "assets/luci-app-singbox-manager_${series}.${f##*.}" || true
             done
           done
-          luci="$(ls artifacts/packages-*/luci-app-singbox-manager-*.apk \
-                     artifacts/packages-*/luci-app-singbox-manager_*.ipk 2>/dev/null | head -1)"
-          [ -n "$luci" ] && cp -v "$luci" assets/
           ls -l assets
           test -n "$(ls -A assets)" || { echo 'No release assets staged'; exit 1; }
 
@@ -91,3 +118,86 @@ jobs:
             --generate-notes \
             --verify-tag \
             assets/*
+
+  package-repository:
+    name: Publish package repository
+    needs: build
+    runs-on: ubuntu-latest
+    # Only publish the self-hosted package feed from tagged releases.
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Checked out for apk/openwrt-singbox.pem — the feed signing public key.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Assemble signed apk feed
+        run: |
+          set -euo pipefail
+          mkdir -p site
+
+          # Publish the feed signing public key at the site root. Clients trust
+          # the feed by installing it as /etc/apk/keys/openwrt-singbox.pem.
+          cp -v apk/openwrt-singbox.pem site/openwrt-singbox.pem
+
+          for d in artifacts/packages-*; do
+            [ -d "$d" ] || continue
+            name="${d##*/packages-}"; series="${name%-*}"
+
+            # Only apk-format releases (25.12+) carry a packages.adb index. opkg
+            # releases (24.10) produce no feed and ship .ipk as release assets.
+            [ -f "$d/packages.adb" ] || continue
+
+            # Name the feed dir by the device's real apk arch (e.g. mipsel_24kc),
+            # NOT the build label — so clients resolve it with `cat /etc/apk/arch`.
+            arch="$(cat "$d/apk-arch")"
+            [ -n "$arch" ] || { echo "missing apk-arch in $d"; exit 1; }
+
+            arch_dir="site/packages/openwrt-${series}/${arch}"
+            mkdir -p "$arch_dir"
+            find "$d" -maxdepth 1 -type f \( -name '*.apk' -o -name 'packages.adb' \) \
+              -exec cp -v {} "$arch_dir"/ \;
+          done
+
+          base='https://aminmokhtari94.github.io/openwrt-singbox'
+          {
+            echo '<!doctype html>'
+            echo '<meta charset="utf-8">'
+            echo '<title>openwrt-singbox package repository</title>'
+            echo '<h1>openwrt-singbox package repository</h1>'
+            echo '<p>Signed <code>apk</code> feeds for OpenWrt 25.12+. Trust the key once, then'
+            echo '   install with plain <code>apk</code> (no <code>--allow-untrusted</code>):</p>'
+            echo '<pre>'
+            echo "wget -O /etc/apk/keys/openwrt-singbox.pem ${base}/openwrt-singbox.pem"
+            echo "echo \"${base}/packages/openwrt-25.12/\$(cat /etc/apk/arch)/packages.adb\" &gt; /etc/apk/repositories.d/openwrt-singbox.list"
+            echo "apk update"
+            echo "apk add singbox-manager luci-app-singbox-manager"
+            echo '</pre>'
+            echo '<p>Available feeds (the path segment is your <code>cat /etc/apk/arch</code>):</p>'
+            echo '<ul>'
+            for sdir in site/packages/openwrt-*/; do
+              [ -d "$sdir" ] || continue
+              for adir in "$sdir"*/; do
+                [ -d "$adir" ] || continue
+                echo "<li><code>/packages/$(basename "$sdir")/$(basename "$adir")/packages.adb</code></li>"
+              done
+            done
+            echo '</ul>'
+            echo '<p>OpenWrt 24.10 uses opkg/.ipk; install those from the GitHub release assets.</p>'
+          } > site/index.html
+
+          find site -type f | sort
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

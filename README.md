@@ -24,6 +24,20 @@ transparent (TProxy) gateway with per-device overrides — without hand-editing
 - **TUN mode** — optional `tun` inbound with `auto_route` / `auto_redirect`.
 - **OpenWrt-native** — UCI config, a procd service, an `rpcd`/`ubus` API, and a LuCI app.
 
+## Screenshots
+
+| Dashboard | Nodes |
+| --- | --- |
+| [![Dashboard — service status, throughput, and logs](screenshots/dashboard.png)](screenshots/dashboard.png) | [![Nodes — subscriptions, node groups, and health/latency](screenshots/nodes.png)](screenshots/nodes.png) |
+
+| DNS | Routing |
+| --- | --- |
+| [![DNS — servers, detours, and DNS rules](screenshots/dns.png)](screenshots/dns.png) | [![Routing — route rules and remote rule-sets](screenshots/routing.png)](screenshots/routing.png) |
+
+| Network | |
+| --- | --- |
+| [![Network — transparent proxy, TUN, and per-device overrides](screenshots/network.png)](screenshots/network.png) | |
+
 ## Components
 
 | Path | What it is |
@@ -46,26 +60,77 @@ transparent (TProxy) gateway with per-device overrides — without hand-editing
 
 ## Install
 
-Download the packages from the
-[Releases](https://github.com/aminmokhtari94/openwrt-singbox/releases/latest) page. The
-release build targets OpenWrt 25.12, which uses the `apk` package manager, and ships:
+Release builds target **OpenWrt 25.12** (which uses the `apk` package manager) and
+**OpenWrt 24.10** (which uses `opkg`/`.ipk`). Pick the path that matches your release.
 
-- `singbox-manager-<version>_<arch>.apk` — the daemon, one per architecture
+### OpenWrt 25.12 — package feed (recommended)
+
+25.12 builds are published as a **signed** self-hosted `apk` feed. Trust the feed's
+signing key once, then install and upgrade with plain `apk` — no `--allow-untrusted`.
+The feed directory is named by your device's apk architecture, so `cat /etc/apk/arch`
+selects it automatically — just paste:
+
+```sh
+# 1. Trust the feed signing key (one time)
+wget -O /etc/apk/keys/openwrt-singbox.pem \
+  https://aminmokhtari94.github.io/openwrt-singbox/openwrt-singbox.pem
+
+# 2. Add the feed. The line points at the packages.adb index file itself, and
+#    lives in repositories.d/ alongside OpenWrt's own distfeeds.list.
+echo "https://aminmokhtari94.github.io/openwrt-singbox/packages/openwrt-25.12/$(cat /etc/apk/arch)/packages.adb" \
+  > /etc/apk/repositories.d/openwrt-singbox.list
+
+# 3. Install
+apk update
+apk add singbox-manager luci-app-singbox-manager
+```
+
+> Prebuilt feeds currently cover x86/64 (`x86_64`), armsr/armv8 (`aarch64_generic`),
+> armsr/armv7 (`arm_cortex-a15_neon-vfpv4`), and ramips/mt7621 (`mipsel_24kc`). If
+> `apk update` 404s, your target isn't published yet — build it yourself with
+> `make ipk-<arch>` (see below).
+
+> Prefer not to install the key? You can skip step 1 and run `apk --allow-untrusted
+> update` / `apk --allow-untrusted add …` instead — but trusting the key is
+> recommended so packages are integrity-verified.
+
+### OpenWrt 24.10 — `.ipk` from the release page
+
+24.10 uses `opkg`, which the project does not publish a feed for. Download the
+matching `.ipk` files from the
+[Releases](https://github.com/aminmokhtari94/openwrt-singbox/releases/latest) page and
+install them with `opkg`:
+
+```sh
+# pick the daemon matching your device's architecture
+opkg install \
+  ./singbox-manager_24.10_x86_64.ipk \
+  ./luci-app-singbox-manager_24.10.ipk
+```
+
+### Manual release installation (25.12)
+
+You can also download `.apk` files from the
+[Releases](https://github.com/aminmokhtari94/openwrt-singbox/releases/latest) page
+instead of using the feed. Each release ships, per series (`24.10`, `25.12`):
+
+- `singbox-manager_<series>_<arch>.{apk,ipk}` — the daemon, one per architecture
   (`x86_64`, `aarch64`, `armv7`, `mipsel`)
-- `luci-app-singbox-manager-<version>.apk` — the web UI (architecture-independent)
+- `luci-app-singbox-manager_<series>.{apk,ipk}` — the web UI (architecture-independent)
 
 ```sh
 # pick the daemon matching your device's architecture
 apk add --allow-untrusted \
-  ./singbox-manager-*_x86_64.apk \
-  ./luci-app-singbox-manager-*.apk
+  ./singbox-manager_25.12_x86_64.apk \
+  ./luci-app-singbox-manager_25.12.apk
 ```
 
-> On OpenWrt releases older than 24.10 (which use `opkg`/`.ipk`), build for your target
-> with `make ipk-<arch>` and install the resulting `.ipk` with `opkg`.
-
-Then open **LuCI → Services → SingBox Manager**. Configuration lives in
+After installing, open **LuCI → Services → SingBox Manager**. Configuration lives in
 `/etc/config/singbox-manager`.
+
+> On OpenWrt releases older than 24.10 there are no prebuilt packages; build for your
+> target with `make ipk-<arch> OPENWRT_VERSION=<release>` and install the resulting
+> `.ipk` with `opkg`.
 
 > `sing-box` is pulled in automatically as a dependency. For **transparent (TProxy)
 > mode**, also install the `kmod-nft-tproxy` kernel module — it is not a package
@@ -89,10 +154,17 @@ make ipk-mipsel      # ramips/mt7621
 make ipk-all         # build every arch in ARCHS into dist/<arch>/
 ```
 
+Builds default to OpenWrt 25.12 (`.apk`). Target 24.10 (`.ipk`) — or any release —
+by setting `OPENWRT_VERSION`; the matching toolchain version is derived automatically:
+
+```sh
+make ipk-x86_64 OPENWRT_VERSION=24.10.7
+```
+
 Override the target without a preset:
 
 ```sh
-make ipk OPENWRT_TARGET_PATH=ath79/generic OPENWRT_VERSION=25.12.4
+make ipk OPENWRT_TARGET_PATH=ath79/generic OPENWRT_VERSION=24.10.7
 ```
 
 ## Develop
@@ -125,7 +197,10 @@ make undeploy          # remove packages and wipe leftover state
 - **CI** (`.github/workflows/ci.yml`) — runs `gofmt`, `go vet`, and the Go test suite on
   every push and pull request.
 - **Release** (`.github/workflows/release.yml`) — on a `v*` tag, builds the OpenWrt
-  packages for all architectures via the SDK and publishes them as a GitHub Release.
+  packages for OpenWrt 24.10 and 25.12 across all architectures via the SDK, publishes
+  them as a GitHub Release, and publishes the signed self-hosted `apk` feed (25.12) to
+  GitHub Pages. The feed index (`packages.adb`) is signed with the EC key stored in the
+  `APK_SIGN_KEY` repository secret; its public half is `apk/openwrt-singbox.pem`.
 
 Cut a release:
 
