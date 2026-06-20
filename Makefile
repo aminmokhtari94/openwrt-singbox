@@ -246,9 +246,11 @@ ipk build-ipk: sdk-link
 	$(sdk_config_reset)
 	printf '%s\n' \
 		'CONFIG_PACKAGE_sing-box=m' \
+		'CONFIG_PACKAGE_kmod-nft-tproxy=m' \
 		'CONFIG_PACKAGE_singbox-manager=m' \
 		'CONFIG_PACKAGE_luci-app-singbox-manager=m' \
 		>> "$(OPENWRT_SDK)/.config"
+	$(MAKE) -C "$(OPENWRT_SDK)" defconfig
 	$(MAKE) -C "$(OPENWRT_SDK)" package/singbox-manager/compile package/luci-app-singbox-manager/compile V=s
 	mkdir -p "$(IPK_DIR)"
 	find "$(OPENWRT_SDK)/bin/packages" -type f \( \
