@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=singbox-manager
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=4
+PKG_RELEASE:=5
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_DEPENDS:=golang/host
@@ -25,12 +25,12 @@ define Package/singbox-manager
   SECTION:=net
   CATEGORY:=Network
   TITLE:=Sing-Box Manager daemon for OpenWrt
-  # kmod-nft-tproxy is required at runtime for transparent (TProxy) mode, but is
-  # intentionally NOT a build dependency: the OpenWrt SDK ships kernel headers
-  # only and cannot build kernel modules, so listing it here breaks SDK/CI
-  # package builds. Install it on the router when enabling transparent proxying:
-  # `opkg install kmod-nft-tproxy` (or `apk add kmod-nft-tproxy`).
-  DEPENDS:=$(GO_ARCH_DEPENDS) +sing-box +rpcd +ubus +uci +jsonfilter
+  # kmod-nft-tproxy is required at runtime for transparent (TProxy) mode. Like
+  # sing-box's own +kmod-tun/+kmod-inet-diag deps, it is only *selected* (never
+  # *compiled*) by our SDK build, so declaring it here is safe and ensures
+  # opkg/apk pulls the stock kmod from the kernel feed at install time. Do NOT
+  # add it to a kmod /compile target — the SDK can't build kernel modules.
+  DEPENDS:=$(GO_ARCH_DEPENDS) +sing-box +rpcd +ubus +uci +jsonfilter +kmod-nft-tproxy
 endef
 
 define Package/singbox-manager/description
@@ -38,8 +38,8 @@ define Package/singbox-manager/description
  configuration, rpcd/ubus API exposure, and generated sing-box runtime
  configuration.
 
- Transparent (TProxy) mode additionally requires the kmod-nft-tproxy kernel
- module; install it from the OpenWrt package feed when enabling that feature.
+ Transparent (TProxy) mode requires the kmod-nft-tproxy kernel module, which is
+ a declared dependency and installed automatically from the OpenWrt feed.
 endef
 
 define Build/Prepare
