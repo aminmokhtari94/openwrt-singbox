@@ -281,11 +281,20 @@ func applyFirewall(cfg managerconfig.Config, paths Paths, result *Result) error 
 	if err := firewall.Apply(cfg, paths.NftablesInclude); err != nil {
 		return err
 	}
-	if cfg.TProxy.Enabled {
+	if cfg.Transparent.Active() {
+		// Transparent proxying is tproxy-only, which needs policy routing
+		// (fwmark rule + local route table) so marked packets reach sing-box.
 		if err := applyTProxyRoutes(); err != nil {
 			return err
 		}
 		result.NftablesPath = paths.NftablesInclude
+		// `fw4 reload` clears chain rules but not named-set elements, so stale
+		// per-device elements must be flushed before the reload re-includes the
+		// freshly rendered fragment. Otherwise device-override changes never take
+		// effect (a device lingers in both the tproxy and bypass sets).
+		if err := flushManagerSets(); err != nil {
+			return err
+		}
 		if FirewallReload != nil {
 			return FirewallReload()
 		}
@@ -295,7 +304,7 @@ func applyFirewall(cfg managerconfig.Config, paths Paths, result *Result) error 
 }
 
 func cleanupFirewall(cfg managerconfig.Config, paths Paths, result *Result) error {
-	if cfg.TProxy.Enabled && cfg.TProxy.KillSwitch {
+	if cfg.Transparent.Active() && cfg.Transparent.KillSwitch {
 		return applyKillSwitchFirewall(cfg, paths, result)
 	}
 	return cleanupFirewallFull(cfg, paths, result)
@@ -363,6 +372,23 @@ func runSingBoxCheck(binary string, configPath string) (string, error) {
 		return output, fmt.Errorf("%w: %s", err, output)
 	}
 	return output, nil
+}
+
+// flushManagerSets empties the manager's named nftables sets so the subsequent
+// firewall reload starts from a clean slate. OpenWrt's `fw4 reload` does not
+// flush named sets, and the re-included fragment only merges elements, so
+// without this stale per-device elements survive across reloads. A set that
+// does not exist yet (first apply) is ignored.
+func flushManagerSets() error {
+	table := strings.Fields(firewall.FW4Table)
+	for _, name := range firewall.ManagedSets {
+		args := append([]string{"nft", "flush", "set"}, table...)
+		args = append(args, name)
+		if err := routeCommand(args...); err != nil && !isRouteMissingError(err) {
+			return err
+		}
+	}
+	return nil
 }
 
 func reloadFirewall() error {

@@ -229,15 +229,26 @@ func applySections(cfg *Config, sections []section) error {
 				return err
 			}
 			cfg.RuleSets[ruleset.ID] = ruleset
-		case "tproxy":
-			if sec.name != "main" && sec.name != "tproxy" {
-				return fmt.Errorf("line %d: unsupported tproxy section %q", sec.line, sec.name)
+		case "transparent":
+			if sec.name != "main" && sec.name != "transparent" {
+				return fmt.Errorf("line %d: unsupported transparent section %q", sec.line, sec.name)
 			}
-			tproxy, err := readTProxy(sec)
+			devices := cfg.Transparent.Devices
+			transparent, err := readTransparent(sec)
 			if err != nil {
 				return err
 			}
-			cfg.TProxy = tproxy
+			transparent.Devices = devices
+			cfg.Transparent = transparent
+		case "proxy_device":
+			if sec.name == "" {
+				return fmt.Errorf("line %d: proxy_device section requires a name", sec.line)
+			}
+			device, err := readProxyDevice(sec)
+			if err != nil {
+				return err
+			}
+			cfg.Transparent.Devices = append(cfg.Transparent.Devices, device)
 		case "tun":
 			if sec.name != "main" && sec.name != "tun" {
 				return fmt.Errorf("line %d: unsupported tun section %q", sec.line, sec.name)
@@ -606,44 +617,75 @@ func readRouteRule(sec section) (RouteRule, error) {
 	return rule, nil
 }
 
-func readTProxy(sec section) (TProxy, error) {
+func readTransparent(sec section) (Transparent, error) {
 	if err := rejectUnknownOptions(sec, map[string]bool{
-		"enabled": true, "dns_hijack": true, "kill_switch": true,
+		"default_mode": true, "dns_hijack": true, "kill_switch": true,
 	}); err != nil {
-		return TProxy{}, err
+		return Transparent{}, err
 	}
 	if err := rejectUnknownLists(sec, map[string]bool{
-		"lan_ifname": true, "include_subnet": true, "exclude_subnet": true, "include_mac": true,
+		"lan_ifname": true, "bypass_subnet": true,
 	}); err != nil {
-		return TProxy{}, err
+		return Transparent{}, err
 	}
 
-	tproxy := TProxy{
-		LANIfnames:    cleanList(sec.lists["lan_ifname"]),
-		IncludeSubnet: cleanList(sec.lists["include_subnet"]),
-		ExcludeSubnet: cleanList(sec.lists["exclude_subnet"]),
-		IncludeMAC:    cleanList(sec.lists["include_mac"]),
+	transparent := Transparent{
+		DefaultMode:  valueOrDefault(sec.options["default_mode"], "off"),
+		LANIfnames:   cleanList(sec.lists["lan_ifname"]),
+		BypassSubnet: cleanList(sec.lists["bypass_subnet"]),
 	}
 	var err error
-	if value, ok := sec.options["enabled"]; ok {
-		tproxy.Enabled, err = parseBool(sec, "enabled", value)
-		if err != nil {
-			return TProxy{}, err
-		}
-	}
 	if value, ok := sec.options["dns_hijack"]; ok {
-		tproxy.DNSHijack, err = parseBool(sec, "dns_hijack", value)
+		transparent.DNSHijack, err = parseBool(sec, "dns_hijack", value)
 		if err != nil {
-			return TProxy{}, err
+			return Transparent{}, err
 		}
 	}
 	if value, ok := sec.options["kill_switch"]; ok {
-		tproxy.KillSwitch, err = parseBool(sec, "kill_switch", value)
+		transparent.KillSwitch, err = parseBool(sec, "kill_switch", value)
 		if err != nil {
-			return TProxy{}, err
+			return Transparent{}, err
 		}
 	}
-	return tproxy, nil
+	return transparent, nil
+}
+
+func readProxyDevice(sec section) (Device, error) {
+	if err := rejectUnknownOptions(sec, map[string]bool{
+		"enabled": true, "name": true, "mac": true, "ipv4": true, "ipv6": true,
+		"mode": true, "bypass_udp": true, "group": true,
+	}); err != nil {
+		return Device{}, err
+	}
+	if err := rejectUnknownLists(sec, nil); err != nil {
+		return Device{}, err
+	}
+
+	device := Device{
+		ID:      sec.name,
+		Enabled: true,
+		Name:    valueOrDefault(sec.options["name"], sec.name),
+		MAC:     sec.options["mac"],
+		IPv4:    sec.options["ipv4"],
+		IPv6:    sec.options["ipv6"],
+		Mode:    valueOrDefault(sec.options["mode"], "default"),
+		Group:   sec.options["group"],
+	}
+	if value, ok := sec.options["enabled"]; ok {
+		enabled, err := parseBool(sec, "enabled", value)
+		if err != nil {
+			return Device{}, err
+		}
+		device.Enabled = enabled
+	}
+	if value, ok := sec.options["bypass_udp"]; ok {
+		bypassUDP, err := parseBool(sec, "bypass_udp", value)
+		if err != nil {
+			return Device{}, err
+		}
+		device.BypassUDP = bypassUDP
+	}
+	return device, nil
 }
 
 func readTUN(sec section) (TUN, error) {

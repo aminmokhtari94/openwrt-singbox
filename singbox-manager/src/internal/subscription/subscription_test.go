@@ -144,6 +144,33 @@ func TestParseVMessDoesNotUseTransportHostAsSNI(t *testing.T) {
 	}
 }
 
+func TestParseVMessStandardURI(t *testing.T) {
+	uri := "vmess://abd4fd93-f23d-4c2e-ac8a-bce395947e6d@104.21.33.234:80?type=httpupgrade&host=v2.mokhtari94.ir&path=/qlb4hqR5wdecX3r8BQxdso&packetEncoding=xudp#Auto%20http%20httpupgrade%20CDN%20vmess"
+
+	node, err := ParseURI(uri)
+	if err != nil {
+		t.Fatalf("parse standard vmess: %v", err)
+	}
+	if node.Type != "vmess" {
+		t.Fatalf("type = %q, want vmess", node.Type)
+	}
+	if node.UUID != "abd4fd93-f23d-4c2e-ac8a-bce395947e6d" {
+		t.Fatalf("uuid = %q", node.UUID)
+	}
+	if node.Server != "104.21.33.234" || node.Port != 80 {
+		t.Fatalf("server/port = %s:%d", node.Server, node.Port)
+	}
+	if node.Transport != "httpupgrade" || node.Host != "v2.mokhtari94.ir" || node.Path != "/qlb4hqR5wdecX3r8BQxdso" {
+		t.Fatalf("transport fields = %#v", node)
+	}
+	if node.TLS {
+		t.Fatal("TLS = true, want false on a port-80 vmess link with no security param")
+	}
+	if node.Security != "auto" {
+		t.Fatalf("cipher = %q, want auto (must not be the TLS setting)", node.Security)
+	}
+}
+
 func TestDueUsesSubscriptionUpdateInterval(t *testing.T) {
 	now := time.Date(2026, 6, 3, 12, 0, 0, 0, time.UTC)
 	source := managerconfig.Subscription{

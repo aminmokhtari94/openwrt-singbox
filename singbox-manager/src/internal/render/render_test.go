@@ -22,9 +22,9 @@ func targetConfig() managerconfig.Config {
 	cfg.Manager.MixedPort = 2080
 	cfg.Manager.TProxyPort = 7893
 	cfg.Manager.DNSPort = 1053
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.DNSHijack = true
-	cfg.TProxy.LANIfnames = []string{"br-lan"}
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = true
+	cfg.Transparent.LANIfnames = []string{"br-lan"}
 
 	cfg.Groups["home"] = managerconfig.Group{
 		ID:           "home",
@@ -327,7 +327,7 @@ func TestRenderStrategySkipsUnsupportedTransportNodes(t *testing.T) {
 	}
 }
 
-func TestRenderManualUnsupportedTransportErrors(t *testing.T) {
+func TestRenderManualUnsupportedTransportFallsBackToDirect(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"
 	cfg.Groups["home"] = managerconfig.Group{
@@ -340,9 +340,35 @@ func TestRenderManualUnsupportedTransportErrors(t *testing.T) {
 	}
 	cfg.Nodes["node-a"] = managerconfig.Node{ID: "node-a", Enabled: true, Type: "vless", Server: "edge.example.com", Port: 443, UUID: "00000000-0000-0000-0000-000000000001", Transport: "xhttp"}
 
-	_, err := Render(cfg)
-	if err == nil || !strings.Contains(err.Error(), "unsupported transport") {
-		t.Fatalf("Render error = %v, want unsupported transport", err)
+	// A selected node with a transport sing-box cannot render must not fail the
+	// whole render: that would block every reload (including firewall changes).
+	// It falls back to a direct selector instead.
+	data, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(string(data), "xhttp") {
+		t.Fatalf("rendered config still references the unsupported node:\n%s", data)
+	}
+
+	var document struct {
+		Outbounds []map[string]any `json:"outbounds"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var proxy map[string]any
+	for _, outbound := range document.Outbounds {
+		if outbound["tag"] == "proxy" {
+			proxy = outbound
+			break
+		}
+	}
+	if proxy == nil {
+		t.Fatalf("no proxy outbound rendered:\n%s", data)
+	}
+	if proxy["type"] != "selector" || proxy["default"] != "direct" {
+		t.Fatalf("proxy outbound = %v, want direct selector fallback", proxy)
 	}
 }
 
@@ -462,8 +488,9 @@ func TestRenderDNSHijackInboundAndRoute(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"
 	cfg.Manager.DNSPort = 1053
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.DNSHijack = true
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.LANIfnames = []string{"br-lan"}
+	cfg.Transparent.DNSHijack = true
 	cfg.Groups["home"] = managerconfig.Group{
 		ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy",
 	}
@@ -592,4 +619,33 @@ func renderedOutbound(t *testing.T, data []byte, tag string) map[string]any {
 	}
 	t.Fatalf("outbound %q not found in %s", tag, data)
 	return nil
+}
+
+func TestRenderHTTPTransport(t *testing.T) {
+	node := managerconfig.Node{
+		ID: "n", Type: "vless", Server: "1.2.3.4", Port: 443, UUID: "u",
+		TLS: true, Transport: "http", Host: "h.example", Path: "/p",
+	}
+	out, err := renderNodeOutbound(node)
+	if err != nil {
+		t.Fatalf("render http transport: %v", err)
+	}
+	transport, ok := out["transport"].(map[string]any)
+	if !ok || transport["type"] != "http" || transport["path"] != "/p" {
+		t.Fatalf("transport = %#v", out["transport"])
+	}
+}
+
+func TestRenderXHTTPTransportUnsupported(t *testing.T) {
+	node := managerconfig.Node{
+		ID: "vless_5c3b4e91_e3e8460f7f", Type: "vless", Server: "1.2.3.4",
+		Port: 443, UUID: "u", TLS: true, Transport: "xhttp",
+	}
+	_, err := renderNodeOutbound(node)
+	if err == nil {
+		t.Fatal("expected error for unsupported xhttp transport")
+	}
+	if !strings.Contains(err.Error(), "xhttp") || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("error = %q, want a clear xhttp-not-supported message", err)
+	}
 }

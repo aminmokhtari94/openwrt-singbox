@@ -399,7 +399,18 @@ func decodeBase64(value string) (string, bool) {
 }
 
 func parseVMess(raw string) (managerconfig.Node, error) {
-	decoded, ok := decodeBase64(strings.TrimPrefix(raw, "vmess://"))
+	body := strings.TrimPrefix(raw, "vmess://")
+	// The newer "standard" share form is vmess://uuid@host:port?params#name
+	// (same shape as vless). The classic form is vmess://base64(json); base64
+	// alphabets never contain '@', so an '@' before the fragment disambiguates.
+	head := body
+	if idx := strings.Index(head, "#"); idx >= 0 {
+		head = head[:idx]
+	}
+	if strings.Contains(head, "@") {
+		return parseStandardURI(raw, "vmess")
+	}
+	decoded, ok := decodeBase64(body)
 	if !ok {
 		return managerconfig.Node{}, fmt.Errorf("invalid vmess payload")
 	}
@@ -459,6 +470,16 @@ func parseStandardURI(raw string, typ string) (managerconfig.Node, error) {
 	switch typ {
 	case "vless":
 		node.UUID = parsed.User.Username()
+	case "vmess":
+		node.UUID = parsed.User.Username()
+		// For vmess the query "security" denotes TLS (already captured in
+		// node.TLS above); the VMess cipher comes from "encryption"/"scy" and
+		// must not be confused with the TLS setting.
+		cipher := firstNonEmpty(query.Get("encryption"), query.Get("scy"))
+		if cipher == "" || cipher == "tls" || cipher == "reality" {
+			cipher = "auto"
+		}
+		node.Security = cipher
 	case "trojan", "hysteria2":
 		password, _ := url.QueryUnescape(parsed.User.Username())
 		node.Password = password

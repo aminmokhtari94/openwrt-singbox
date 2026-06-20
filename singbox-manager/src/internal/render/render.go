@@ -99,7 +99,7 @@ func renderInbounds(cfg managerconfig.Config) []map[string]any {
 		},
 	}
 
-	if cfg.TProxy.Enabled {
+	if cfg.UsesTProxy() {
 		inbounds = append(inbounds, map[string]any{
 			"type":        "tproxy",
 			"tag":         "tproxy-in",
@@ -176,6 +176,15 @@ func renderOutbounds(cfg managerconfig.Config) ([]map[string]any, string, error)
 		}
 		nodeOutbound, err := renderNodeOutbound(*node)
 		if err != nil {
+			// A selected node whose transport sing-box cannot render (e.g.
+			// xhttp/splithttp) must not abort the whole render: that would block
+			// every reload, including independent firewall/transparent changes.
+			// Fall back to a direct selector, mirroring renderStrategyNodes which
+			// already skips unsupported nodes.
+			if errors.Is(err, errUnsupportedTransport) {
+				outbounds = append(outbounds, fallbackSelector())
+				return outbounds, "proxy", nil
+			}
 			return nil, "", err
 		}
 		nodeTag := stringValue(nodeOutbound["tag"])
@@ -444,8 +453,18 @@ func addTransport(outbound map[string]any, node managerconfig.Node) error {
 		if node.Path != "" {
 			transport["service_name"] = strings.TrimPrefix(node.Path, "/")
 		}
+	case "http":
+		if node.Host != "" {
+			transport["host"] = []string{node.Host}
+		}
+		if node.Path != "" {
+			transport["path"] = node.Path
+		}
 	default:
-		return fmt.Errorf("%w %q for node %q", errUnsupportedTransport, node.Transport, node.ID)
+		// sing-box only implements ws, grpc, http, httpupgrade, and quic V2Ray
+		// transports. xhttp/splithttp are Xray-only and have no sing-box
+		// equivalent, so a node using them cannot be rendered.
+		return fmt.Errorf("%w %q for node %q: sing-box supports ws, grpc, http, and httpupgrade; xhttp/splithttp are not supported", errUnsupportedTransport, node.Transport, node.ID)
 	}
 	outbound["transport"] = transport
 	return nil
@@ -792,7 +811,7 @@ func normalizeSourceCIDRs(sources []string) []string {
 }
 
 func dnsHijackEnabled(cfg managerconfig.Config) bool {
-	return cfg.TProxy.Enabled && cfg.TProxy.DNSHijack
+	return cfg.Transparent.Active() && cfg.Transparent.DNSHijack
 }
 
 func routeFinal(cfg managerconfig.Config, proxyTag string) string {

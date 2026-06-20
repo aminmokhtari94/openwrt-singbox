@@ -202,14 +202,25 @@ type RouteRulePayload struct {
 	Outbound string   `json:"outbound"`
 }
 
-type TProxyPayload struct {
-	Enabled       bool     `json:"enabled"`
-	LANIfnames    []string `json:"lan_ifnames"`
-	IncludeSubnet []string `json:"include_subnet"`
-	ExcludeSubnet []string `json:"exclude_subnet"`
-	IncludeMAC    []string `json:"include_mac"`
-	DNSHijack     bool     `json:"dns_hijack"`
-	KillSwitch    bool     `json:"kill_switch"`
+type TransparentPayload struct {
+	DefaultMode  string          `json:"default_mode"`
+	LANIfnames   []string        `json:"lan_ifnames"`
+	BypassSubnet []string        `json:"bypass_subnet"`
+	Devices      []DevicePayload `json:"devices"`
+	DNSHijack    bool            `json:"dns_hijack"`
+	KillSwitch   bool            `json:"kill_switch"`
+}
+
+type DevicePayload struct {
+	ID        string `json:"id"`
+	Enabled   bool   `json:"enabled"`
+	Name      string `json:"name"`
+	MAC       string `json:"mac"`
+	IPv4      string `json:"ipv4"`
+	IPv6      string `json:"ipv6"`
+	Mode      string `json:"mode"`
+	BypassUDP bool   `json:"bypass_udp"`
+	Group     string `json:"group"`
 }
 
 type TUNPayload struct {
@@ -497,8 +508,8 @@ func runRPCD(args []string) {
 			"runtime_stats":         {},
 			"logs":                  {"lines": "number"},
 			"devices":               {},
-			"tproxy":                {},
-			"tproxy_set":            {"tproxy": "object"},
+			"transparent":           {},
+			"transparent_set":       {"transparent": "object"},
 			"tun":                   {},
 			"tun_set":               {"tun": "object"},
 		})
@@ -639,10 +650,10 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, logs(req.Params))
 	case "devices":
 		writeHTTPJSON(w, http.StatusOK, devices())
-	case "tproxy":
-		writeHTTPJSON(w, http.StatusOK, tproxyStatus(configPath))
-	case "tproxy_set":
-		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setTProxy(configPath, req.Params)))
+	case "transparent":
+		writeHTTPJSON(w, http.StatusOK, transparentStatus(configPath))
+	case "transparent_set":
+		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setTransparent(configPath, req.Params)))
 	case "tun":
 		writeHTTPJSON(w, http.StatusOK, tunStatus(configPath))
 	case "tun_set":
@@ -942,7 +953,7 @@ func listDNS(configPath string) map[string]any {
 		"dns_final":          dnsFinal,
 		"servers":            servers,
 		"rules":              rules,
-		"capture_enabled":    cfg.TProxy.Enabled && cfg.TProxy.DNSHijack,
+		"capture_enabled":    cfg.Transparent.Active() && cfg.Transparent.DNSHijack,
 		"warnings":           dnsWarnings(*cfg),
 		"rendered_servers":   dnsServers,
 		"rendered_rules":     dnsRules,
@@ -953,7 +964,7 @@ func listDNS(configPath string) map[string]any {
 
 func dnsWarnings(cfg managerconfig.Config) []string {
 	warnings := []string{}
-	if cfg.TProxy.Enabled && cfg.TProxy.DNSHijack && !hasUsableDNSUpstream(cfg) {
+	if cfg.Transparent.Active() && cfg.Transparent.DNSHijack && !hasUsableDNSUpstream(cfg) {
 		warnings = append(warnings, "DNS capture is enabled but no DNS server is enabled with a usable address")
 	}
 	return warnings
@@ -1185,34 +1196,50 @@ func devices() map[string]any {
 	return map[string]any{"ok": true, "devices": discoverDevices()}
 }
 
-func tproxyStatus(configPath string) map[string]any {
+func transparentStatus(configPath string) map[string]any {
 	cfg, err := managerconfig.Load(configPath)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
 	preview := ""
-	if cfg.TProxy.Enabled {
+	if cfg.Transparent.Active() {
 		data, err := firewall.Render(*cfg)
 		if err != nil {
 			return validationResult(false, runtime.Result{}, err)
 		}
 		preview = string(data)
 	}
+	devices := make([]map[string]any, 0, len(cfg.Transparent.Devices))
+	for _, device := range cfg.Transparent.Devices {
+		devices = append(devices, map[string]any{
+			"id":         device.ID,
+			"enabled":    device.Enabled,
+			"name":       device.Name,
+			"mac":        device.MAC,
+			"ipv4":       device.IPv4,
+			"ipv6":       device.IPv6,
+			"mode":       device.Mode,
+			"bypass_udp": device.BypassUDP,
+			"effective":  cfg.Transparent.Effective(device),
+			"group":      device.Group,
+		})
+	}
 	return map[string]any{
-		"ok":                 true,
-		"enabled":            cfg.TProxy.Enabled,
-		"lan_ifnames":        cfg.TProxy.LANIfnames,
-		"include_subnet":     cfg.TProxy.IncludeSubnet,
-		"exclude_subnet":     cfg.TProxy.ExcludeSubnet,
-		"include_mac":        cfg.TProxy.IncludeMAC,
-		"dns_hijack":         cfg.TProxy.DNSHijack,
-		"kill_switch":        cfg.TProxy.KillSwitch,
-		"tproxy_port":        cfg.Manager.TProxyPort,
-		"dns_port":           cfg.Manager.DNSPort,
-		"nftables_include":   runtime.DefaultPaths.NftablesInclude,
-		"nftables_present":   fileExists(runtime.DefaultPaths.NftablesInclude),
-		"nftables_preview":   preview,
-		"tproxy_inbound_tag": "tproxy-in",
+		"ok":               true,
+		"default_mode":     cfg.Transparent.DefaultMode,
+		"active":           cfg.Transparent.Active(),
+		"uses_tproxy":      cfg.UsesTProxy(),
+		"lan_ifnames":      cfg.Transparent.LANIfnames,
+		"bypass_subnet":    cfg.Transparent.BypassSubnet,
+		"devices":          devices,
+		"dns_hijack":       cfg.Transparent.DNSHijack,
+		"kill_switch":      cfg.Transparent.KillSwitch,
+		"tproxy_port":      cfg.Manager.TProxyPort,
+		"dns_port":         cfg.Manager.DNSPort,
+		"nftables_include": runtime.DefaultPaths.NftablesInclude,
+		"nftables_present": fileExists(runtime.DefaultPaths.NftablesInclude),
+		"nftables_preview": preview,
+		"lan_devices":      discoverDevices(),
 	}
 }
 
@@ -1232,24 +1259,44 @@ func tunStatus(configPath string) map[string]any {
 	}
 }
 
-func setTProxy(configPath string, raw json.RawMessage) map[string]any {
-	payload, err := decodeTProxy(raw)
+func setTransparent(configPath string, raw json.RawMessage) map[string]any {
+	payload, err := decodeTransparent(raw)
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	tproxy := managerconfig.TProxy{
-		Enabled:       payload.Enabled,
-		LANIfnames:    payload.LANIfnames,
-		IncludeSubnet: payload.IncludeSubnet,
-		ExcludeSubnet: payload.ExcludeSubnet,
-		IncludeMAC:    payload.IncludeMAC,
-		DNSHijack:     payload.DNSHijack,
-		KillSwitch:    payload.KillSwitch,
+	defaultMode := payload.DefaultMode
+	if defaultMode == "" {
+		defaultMode = "off"
 	}
-	if err := managerconfig.UpsertTProxy(configPath, tproxy); err != nil {
+	transparent := managerconfig.Transparent{
+		DefaultMode:  defaultMode,
+		LANIfnames:   payload.LANIfnames,
+		BypassSubnet: payload.BypassSubnet,
+		DNSHijack:    payload.DNSHijack,
+		KillSwitch:   payload.KillSwitch,
+	}
+	for _, device := range payload.Devices {
+		mode := device.Mode
+		if mode == "" {
+			mode = "default"
+		}
+		// An empty ID lets the config layer derive the section name from Name.
+		transparent.Devices = append(transparent.Devices, managerconfig.Device{
+			ID:        device.ID,
+			Enabled:   device.Enabled,
+			Name:      device.Name,
+			MAC:       device.MAC,
+			IPv4:      device.IPv4,
+			IPv6:      device.IPv6,
+			Mode:      mode,
+			BypassUDP: device.BypassUDP,
+			Group:     device.Group,
+		})
+	}
+	if err := managerconfig.UpsertTransparent(configPath, transparent); err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	return map[string]any{"ok": true, "enabled": tproxy.Enabled}
+	return map[string]any{"ok": true, "default_mode": transparent.DefaultMode, "active": transparent.Active()}
 }
 
 func setTUN(configPath string, raw json.RawMessage) map[string]any {
@@ -1568,9 +1615,9 @@ func compactConfig(cfg managerconfig.Config) ManagerConfig {
 		LatencyMS:     latency,
 		SocketPath:    cfg.Manager.SocketPath,
 		SingBoxBinary: cfg.Manager.SingBoxBinary,
-		TProxyEnabled: cfg.TProxy.Enabled,
-		DNSHijack:     cfg.TProxy.DNSHijack,
-		KillSwitch:    cfg.TProxy.KillSwitch,
+		TProxyEnabled: cfg.Transparent.Active(),
+		DNSHijack:     cfg.Transparent.DNSHijack,
+		KillSwitch:    cfg.Transparent.KillSwitch,
 		TUNEnabled:    cfg.TUN.Enabled,
 	}
 }
@@ -1828,11 +1875,23 @@ func lastStrings(values []string, n int) []string {
 }
 
 func discoverDevices() []Device {
+	return collectDevices(
+		parseDHCPLeases("/tmp/dhcp.leases"),
+		parseARP("/proc/net/arp"),
+		infraAddrs("/proc/net/route"),
+	)
+}
+
+// collectDevices merges DHCP leases with ARP neighbours into a deduplicated,
+// sorted device list, dropping infrastructure addresses (the router's own
+// IPs, subnet broadcasts and gateways) and anything that is not a routable
+// unicast host — those are never end-user LAN devices a user would pick.
+func collectDevices(leases, arp []Device, skip map[string]bool) []Device {
 	byIP := map[string]Device{}
-	for _, device := range parseDHCPLeases("/tmp/dhcp.leases") {
+	for _, device := range leases {
 		byIP[device.IP] = device
 	}
-	for _, device := range parseARP("/proc/net/arp") {
+	for _, device := range arp {
 		if existing, ok := byIP[device.IP]; ok {
 			if existing.MAC == "" {
 				existing.MAC = device.MAC
@@ -1844,12 +1903,121 @@ func discoverDevices() []Device {
 	}
 	devices := make([]Device, 0, len(byIP))
 	for _, device := range byIP {
+		if skip[device.IP] || !isPickableHostIP(device.IP) {
+			continue
+		}
 		devices = append(devices, device)
 	}
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].IP < devices[j].IP
 	})
 	return devices
+}
+
+// infraAddrs returns the set of addresses the device picker hides: every
+// router interface IP, the broadcast address of each local IPv4 subnet, and
+// the default gateway(s) read from routePath (/proc/net/route).
+func infraAddrs(routePath string) map[string]bool {
+	skip := map[string]bool{}
+	if ifaces, err := net.Interfaces(); err == nil {
+		for _, iface := range ifaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				ipNet, ok := addr.(*net.IPNet)
+				if !ok {
+					continue
+				}
+				if ip := ipNet.IP.String(); ip != "<nil>" {
+					skip[ip] = true
+				}
+				if bcast := broadcastIP(ipNet); bcast != "" {
+					skip[bcast] = true
+				}
+			}
+		}
+	}
+	for _, gw := range defaultGateways(routePath) {
+		skip[gw] = true
+	}
+	return skip
+}
+
+// broadcastIP returns the directed-broadcast address of an IPv4 network, or
+// "" for IPv6 networks (which have no broadcast).
+func broadcastIP(ipNet *net.IPNet) string {
+	ip4 := ipNet.IP.To4()
+	if ip4 == nil {
+		return ""
+	}
+	mask := ipNet.Mask
+	if len(mask) == net.IPv6len {
+		mask = mask[12:]
+	}
+	if len(mask) != net.IPv4len {
+		return ""
+	}
+	bcast := make(net.IP, net.IPv4len)
+	for i := 0; i < net.IPv4len; i++ {
+		bcast[i] = ip4[i] | ^mask[i]
+	}
+	return bcast.String()
+}
+
+// defaultGateways parses /proc/net/route for default-route (0.0.0.0) gateways
+// and returns them as dotted-quad strings.
+func defaultGateways(path string) []string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	gateways := []string{}
+	for i, line := range strings.Split(string(data), "\n") {
+		if i == 0 {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 || fields[1] != "00000000" {
+			continue
+		}
+		if gw := decodeRouteIP(fields[2]); gw != "" {
+			gateways = append(gateways, gw)
+		}
+	}
+	return gateways
+}
+
+// decodeRouteIP decodes the little-endian hex IPv4 address used in the
+// Gateway/Destination columns of /proc/net/route.
+func decodeRouteIP(hexStr string) string {
+	if len(hexStr) != 8 {
+		return ""
+	}
+	raw, err := hex.DecodeString(hexStr)
+	if err != nil || len(raw) != 4 {
+		return ""
+	}
+	return net.IPv4(raw[3], raw[2], raw[1], raw[0]).String()
+}
+
+// isPickableHostIP reports whether an address is a normal routable host a user
+// would assign a per-device override to — rejecting the unspecified, loopback,
+// link-local, multicast and limited-broadcast ranges.
+func isPickableHostIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil && ip4.Equal(net.IPv4bcast) {
+		return false
+	}
+	return true
 }
 
 func parseDHCPLeases(path string) []Device {
@@ -2049,16 +2217,16 @@ func decodeRuleSet(raw json.RawMessage) (managerconfig.RuleSet, error) {
 	return ruleSetFromPayload(payload), nil
 }
 
-func decodeTProxy(raw json.RawMessage) (TProxyPayload, error) {
+func decodeTransparent(raw json.RawMessage) (TransparentPayload, error) {
 	var envelope struct {
-		TProxy *TProxyPayload `json:"tproxy"`
+		Transparent *TransparentPayload `json:"transparent"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.TProxy != nil {
-		return *envelope.TProxy, nil
+	if err := json.Unmarshal(raw, &envelope); err == nil && envelope.Transparent != nil {
+		return *envelope.Transparent, nil
 	}
-	var payload TProxyPayload
+	var payload TransparentPayload
 	if err := json.Unmarshal(raw, &payload); err != nil {
-		return TProxyPayload{}, err
+		return TransparentPayload{}, err
 	}
 	return payload, nil
 }

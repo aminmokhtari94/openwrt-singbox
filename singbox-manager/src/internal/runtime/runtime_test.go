@@ -8,7 +8,57 @@ import (
 	"testing"
 
 	managerconfig "github.com/openwrt-singbox/singbox-manager/internal/config"
+	"github.com/openwrt-singbox/singbox-manager/internal/firewall"
 )
+
+func TestApplyFirewallFlushesManagerSetsBeforeReload(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.LANIfnames = []string{"eth2"}
+
+	var commands []string
+	oldRouteCommand := routeCommand
+	routeCommand = func(args ...string) error {
+		command := strings.Join(args, " ")
+		commands = append(commands, command)
+		// A set that does not exist yet must not abort the apply.
+		if strings.HasPrefix(command, "nft flush set") {
+			return errors.New("exit status 1: Error: No such file or directory")
+		}
+		if strings.Contains(command, " rule del ") {
+			return errors.New("exit status 2: RTNETLINK answers: No such process")
+		}
+		return nil
+	}
+	t.Cleanup(func() { routeCommand = oldRouteCommand })
+
+	reloadCalled := false
+	oldFirewallReload := FirewallReload
+	FirewallReload = func() error { reloadCalled = true; return nil }
+	t.Cleanup(func() { FirewallReload = oldFirewallReload })
+
+	path := filepath.Join(t.TempDir(), "90-singbox-manager.nft")
+	result := Result{}
+	if err := applyFirewall(cfg, Paths{NftablesInclude: path}, &result); err != nil {
+		t.Fatalf("apply firewall: %v", err)
+	}
+	if !reloadCalled {
+		t.Fatal("firewall reload was not called")
+	}
+	for _, name := range firewall.ManagedSets {
+		want := "nft flush set " + firewall.FW4Table + " " + name
+		found := false
+		for _, command := range commands {
+			if command == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing flush for set %q; commands = %#v", name, commands)
+		}
+	}
+}
 
 func TestStatusAliveTreatsZombieAsStopped(t *testing.T) {
 	alive, ok := statusAlive([]byte("Name:\tsing-box\nState:\tZ (zombie)\n"))
@@ -179,9 +229,9 @@ func TestCleanupTProxyRoutesIgnoresMissingRoutes(t *testing.T) {
 
 func TestCleanupFirewallLeavesKillSwitchOnly(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.KillSwitch = true
-	cfg.TProxy.LANIfnames = []string{"eth2"}
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.KillSwitch = true
+	cfg.Transparent.LANIfnames = []string{"eth2"}
 
 	oldRouteCommand := routeCommand
 	routeCommand = func(args ...string) error {
@@ -203,7 +253,7 @@ func TestCleanupFirewallLeavesKillSwitchOnly(t *testing.T) {
 		t.Fatalf("read kill switch include: %v", err)
 	}
 	got := string(data)
-	if strings.Contains(got, "singbox_manager_tproxy_prerouting") {
+	if strings.Contains(got, "chain singbox_manager_tproxy {") {
 		t.Fatalf("cleanup left tproxy chain in kill switch mode:\n%s", got)
 	}
 	if !strings.Contains(got, "singbox_manager_kill_switch_forward") || !strings.Contains(got, "counter drop") {
@@ -213,9 +263,9 @@ func TestCleanupFirewallLeavesKillSwitchOnly(t *testing.T) {
 
 func TestTeardownRemovesKillSwitchFirewall(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.KillSwitch = true
-	cfg.TProxy.LANIfnames = []string{"eth2"}
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.KillSwitch = true
+	cfg.Transparent.LANIfnames = []string{"eth2"}
 
 	oldRouteCommand := routeCommand
 	routeCommand = func(args ...string) error {

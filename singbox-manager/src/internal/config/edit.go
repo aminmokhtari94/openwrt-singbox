@@ -169,6 +169,12 @@ func DeleteSubscription(path string, subscriptionID string) error {
 		return fmt.Errorf("subscription id is required")
 	}
 	return editConfig(path, func(sections []section) ([]section, error) {
+		deletedNodes := map[string]bool{}
+		for _, sec := range sections {
+			if sec.typ == "node" && sec.options["subscription"] == subscriptionID {
+				deletedNodes[sec.name] = true
+			}
+		}
 		next := make([]section, 0, len(sections))
 		found := false
 		for _, sec := range sections {
@@ -180,6 +186,9 @@ func DeleteSubscription(path string, subscriptionID string) error {
 				continue
 			case sec.typ == "group":
 				removeListValue(&sec, "subscription", subscriptionID)
+				if deletedNodes[sec.options["selected_node"]] {
+					delete(sec.options, "selected_node")
+				}
 			}
 			next = append(next, sec)
 		}
@@ -226,6 +235,9 @@ func DeleteManualNode(path string, nodeID string) error {
 				}
 				found = true
 				continue
+			}
+			if sec.typ == "group" && sec.options["selected_node"] == nodeID {
+				delete(sec.options, "selected_node")
 			}
 			next = append(next, sec)
 		}
@@ -531,20 +543,24 @@ func DeleteRuleSet(path string, rulesetID string) error {
 	})
 }
 
-// UpsertTProxy rewrites the transparent-proxy section. Cross-section rules
-// (e.g. tproxy and tun cannot both be enabled) are enforced by editConfig's
+// UpsertTransparent rewrites the transparent section and the full set of
+// proxy_device sections in one shot. Cross-section rules (e.g. transparent
+// proxying and tun cannot both be enabled) are enforced by editConfig's
 // validation pass, so an invalid combination is rejected before it is written.
-func UpsertTProxy(path string, tproxy TProxy) error {
+func UpsertTransparent(path string, transparent Transparent) error {
 	return editConfig(path, func(sections []section) ([]section, error) {
-		replacement := tproxySection(tproxy)
-		for i := range sections {
-			if sections[i].typ == "tproxy" {
-				replacement.name = sections[i].name
-				sections[i] = replacement
-				return sections, nil
+		kept := make([]section, 0, len(sections))
+		for _, sec := range sections {
+			if sec.typ == "transparent" || sec.typ == "proxy_device" {
+				continue
 			}
+			kept = append(kept, sec)
 		}
-		return append(sections, replacement), nil
+		kept = append(kept, transparentSection(transparent))
+		for _, device := range transparent.Devices {
+			kept = append(kept, proxyDeviceSection(device))
+		}
+		return kept, nil
 	})
 }
 
@@ -758,26 +774,38 @@ func ruleSetSection(sectionName string, ruleset RuleSet) section {
 	}
 }
 
-func tproxySection(tproxy TProxy) section {
+func transparentSection(transparent Transparent) section {
 	options := map[string]string{
-		"enabled":     boolString(tproxy.Enabled),
-		"dns_hijack":  boolString(tproxy.DNSHijack),
-		"kill_switch": boolString(tproxy.KillSwitch),
+		"default_mode": valueOrDefault(transparent.DefaultMode, "off"),
+		"dns_hijack":   boolString(transparent.DNSHijack),
+		"kill_switch":  boolString(transparent.KillSwitch),
 	}
 	lists := map[string][]string{}
-	if v := cleanList(tproxy.LANIfnames); len(v) > 0 {
+	if v := cleanList(transparent.LANIfnames); len(v) > 0 {
 		lists["lan_ifname"] = v
 	}
-	if v := cleanList(tproxy.IncludeSubnet); len(v) > 0 {
-		lists["include_subnet"] = v
+	if v := cleanList(transparent.BypassSubnet); len(v) > 0 {
+		lists["bypass_subnet"] = v
 	}
-	if v := cleanList(tproxy.ExcludeSubnet); len(v) > 0 {
-		lists["exclude_subnet"] = v
+	return section{typ: "transparent", name: "transparent", options: options, lists: lists}
+}
+
+func proxyDeviceSection(device Device) section {
+	name := device.ID
+	if name == "" {
+		name = sectionNameFromID(device.Name)
 	}
-	if v := cleanList(tproxy.IncludeMAC); len(v) > 0 {
-		lists["include_mac"] = v
+	options := map[string]string{
+		"enabled":    boolString(device.Enabled),
+		"mode":       valueOrDefault(device.Mode, "default"),
+		"bypass_udp": boolString(device.BypassUDP),
 	}
-	return section{typ: "tproxy", name: "tproxy", options: options, lists: lists}
+	setOrDelete(options, "name", device.Name)
+	setOrDelete(options, "mac", device.MAC)
+	setOrDelete(options, "ipv4", device.IPv4)
+	setOrDelete(options, "ipv6", device.IPv6)
+	setOrDelete(options, "group", device.Group)
+	return section{typ: "proxy_device", name: name, options: options, lists: map[string][]string{}}
 }
 
 func tunSection(tun TUN) section {

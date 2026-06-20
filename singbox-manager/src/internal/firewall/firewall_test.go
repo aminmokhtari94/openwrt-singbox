@@ -9,43 +9,161 @@ import (
 	managerconfig "github.com/openwrt-singbox/singbox-manager/internal/config"
 )
 
-func TestRenderTProxyNftablesInclude(t *testing.T) {
+func baseConfig() managerconfig.Config {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.TProxyPort = 7893
 	cfg.Manager.DNSPort = 1053
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.LANIfnames = []string{"br-lan"}
-	cfg.TProxy.IncludeSubnet = []string{"192.168.1.0/24"}
-	cfg.TProxy.ExcludeSubnet = []string{"10.0.0.0/8", "fd00::/8"}
-	cfg.TProxy.IncludeMAC = []string{"00:11:22:33:44:55"}
-	cfg.TProxy.DNSHijack = true
+	cfg.Transparent.LANIfnames = []string{"br-lan"}
+	return cfg
+}
 
+func mustRender(t *testing.T, cfg managerconfig.Config) string {
+	t.Helper()
 	data, err := Render(cfg)
 	if err != nil {
 		t.Fatalf("render firewall: %v", err)
 	}
-	got := string(data)
-	for _, want := range []string{
-		"chain singbox_manager_tproxy_prerouting",
-		`iifname != { "br-lan" } return`,
-		"ether saddr != { 00:11:22:33:44:55 } return",
-		"meta nfproto ipv4 ip daddr != { 192.168.1.0/24 } return",
-		"meta nfproto ipv6 return",
-		"udp dport 53 redirect to :1053",
-		"meta nfproto ipv4 ip daddr { 10.0.0.0/8 } return",
-		"meta nfproto ipv6 ip6 daddr { fd00::/8 } return",
-		"meta l4proto { tcp, udp } meta mark set 0x1 tproxy to :7893 accept",
-	} {
+	return string(data)
+}
+
+func requireAll(t *testing.T, got string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
 		if !strings.Contains(got, want) {
 			t.Fatalf("rendered firewall missing %q:\n%s", want, got)
 		}
 	}
 }
 
-func TestApplyAndCleanupTProxyInclude(t *testing.T) {
-	cfg := managerconfig.DefaultConfig()
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.LANIfnames = []string{"br-lan"}
+func requireNone(t *testing.T, got string, unwanted ...string) {
+	t.Helper()
+	for _, bad := range unwanted {
+		if strings.Contains(got, bad) {
+			t.Fatalf("rendered firewall unexpectedly contains %q:\n%s", bad, got)
+		}
+	}
+}
+
+// Default tproxy: a single catch-all mangle chain, and (crucially) no nat
+// `redirect` statement anywhere — DNS is left to sing-box's hijack-dns route
+// rule.
+func TestRenderDefaultTProxy(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = true
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"chain singbox_manager_tproxy {",
+		"type filter hook prerouting priority mangle; policy accept;",
+		`iifname != { "br-lan" } return`,
+		"\tgoto singbox_manager_tproxy_do\n",
+		"meta l4proto { tcp, udp } meta mark set 0x1 tproxy to :7893 accept",
+	)
+	requireNone(t, got,
+		"chain singbox_manager_redirect {",
+		"redirect", // the whole redirect path is gone
+		"dnat",
+	)
+}
+
+// Per-device UDP bypass: default tproxy with one device whose UDP egresses
+// directly. The device's address lands in the udpbypass set, and the tproxy
+// chain returns its UDP before the catch-all goto (so TCP is still tproxied).
+func TestRenderUDPBypass(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "console", Enabled: true, IPv4: "192.168.1.50", Mode: "tproxy", BypassUDP: true},
+	}
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"meta l4proto udp ip saddr @singbox_manager_udpbypass4 return",
+		"meta l4proto udp ether saddr @singbox_manager_udpbypass_mac return",
+		"\tgoto singbox_manager_tproxy_do\n",
+		// the device address lands in the udpbypass set
+		"set singbox_manager_udpbypass4 {",
+		"elements = { 192.168.1.50 }",
+	)
+
+	// The UDP return must come before the catch-all goto so only UDP bypasses;
+	// TCP still falls through to the tproxy path.
+	udpIdx := strings.Index(got, "meta l4proto udp ip saddr @singbox_manager_udpbypass4 return")
+	gotoIdx := strings.Index(got, "\tgoto singbox_manager_tproxy_do\n")
+	if udpIdx < 0 || gotoIdx < 0 || udpIdx > gotoIdx {
+		t.Fatalf("UDP-bypass return must precede the tproxy goto:\n%s", got)
+	}
+}
+
+// A bypass_udp flag on a non-tproxy device is ignored: a bypassed device is
+// already fully direct, so it never enters the udpbypass set.
+func TestRenderUDPBypassIgnoredWhenNotTProxy(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "tv", Enabled: true, IPv4: "192.168.1.51", Mode: "bypass", BypassUDP: true},
+	}
+
+	b := bucketDevices(cfg)
+	if len(b.udpBypass4) != 0 {
+		t.Fatalf("udpbypass bucket = %v, want empty for a bypass-mode device", b.udpBypass4)
+	}
+}
+
+// DefaultMode off is a whitelist: the tproxy chain acts only on its explicit
+// set, with no catch-all goto.
+func TestRenderWhitelist(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "off"
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "phone", Enabled: true, IPv4: "192.168.1.50", Mode: "tproxy"},
+		{ID: "tv", Enabled: true, IPv4: "192.168.1.51", Mode: "bypass"},
+	}
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"ip saddr @singbox_manager_tproxy4 goto singbox_manager_tproxy_do",
+		"elements = { 192.168.1.50 }",
+	)
+	// No catch-all goto in the tproxy chain when proxying is a whitelist.
+	requireNone(t, got, "\tgoto singbox_manager_tproxy_do\n")
+}
+
+// A device resolves to a tproxy or bypass bucket; a tproxy device that opts out
+// of proxied UDP appears in the udpbypass bucket too (so its TCP is still
+// proxied while its UDP egresses directly).
+func TestBuckets(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "off"
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "a", Enabled: true, MAC: "aa:bb:cc:dd:ee:01", Mode: "tproxy"},
+		{ID: "b", Enabled: true, MAC: "aa:bb:cc:dd:ee:02", Mode: "bypass"},
+		{ID: "c", Enabled: true, MAC: "aa:bb:cc:dd:ee:03", Mode: "tproxy", BypassUDP: true},
+		{ID: "d", Enabled: false, MAC: "aa:bb:cc:dd:ee:04", Mode: "tproxy"},
+	}
+
+	b := bucketDevices(cfg)
+	assertExactly(t, "tproxy", b.tproxyMAC, "aa:bb:cc:dd:ee:01", "aa:bb:cc:dd:ee:03")
+	assertExactly(t, "bypass", b.bypassMAC, "aa:bb:cc:dd:ee:02")
+	assertExactly(t, "udpbypass", b.udpBypassMAC, "aa:bb:cc:dd:ee:03")
+}
+
+func assertExactly(t *testing.T, label string, got []string, want ...string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s bucket = %v, want %v", label, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%s bucket = %v, want %v", label, got, want)
+		}
+	}
+}
+
+func TestApplyAndCleanup(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
 
 	path := filepath.Join(t.TempDir(), "90-singbox-manager.nft")
 	if err := Apply(cfg, path); err != nil {
@@ -54,7 +172,9 @@ func TestApplyAndCleanupTProxyInclude(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("expected include file: %v", err)
 	}
-	cfg.TProxy.Enabled = false
+
+	// Disabling all proxying removes the fragment.
+	cfg.Transparent.DefaultMode = "off"
 	if err := Apply(cfg, path); err != nil {
 		t.Fatalf("cleanup disabled firewall: %v", err)
 	}
@@ -63,46 +183,58 @@ func TestApplyAndCleanupTProxyInclude(t *testing.T) {
 	}
 }
 
-func TestRenderTProxyKillSwitchForwardChain(t *testing.T) {
-	cfg := managerconfig.DefaultConfig()
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.KillSwitch = true
-	cfg.TProxy.LANIfnames = []string{"eth2"}
-	cfg.TProxy.ExcludeSubnet = []string{"192.168.0.0/16"}
+func TestRenderKillSwitch(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.KillSwitch = true
 
-	data, err := Render(cfg)
-	if err != nil {
-		t.Fatalf("render firewall: %v", err)
-	}
-	got := string(data)
-	for _, want := range []string{
-		"chain singbox_manager_tproxy_prerouting",
-		"chain singbox_manager_kill_switch_forward",
-		`iifname != { "eth2" } return`,
-		"meta nfproto ipv4 ip daddr { 192.168.0.0/16 } return",
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"chain singbox_manager_kill_switch_forward {",
+		"type filter hook forward priority filter; policy accept;",
 		"counter drop",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("rendered firewall missing %q:\n%s", want, got)
-		}
+	)
+
+	// RenderKillSwitch alone emits the drop chain but not the proxy chains.
+	data, err := RenderKillSwitch(cfg)
+	if err != nil {
+		t.Fatalf("render kill switch: %v", err)
 	}
+	ks := string(data)
+	requireAll(t, ks, "chain singbox_manager_kill_switch_forward {", "counter drop")
+	requireNone(t, ks, "chain singbox_manager_tproxy {", "chain singbox_manager_redirect {")
 }
 
-func TestRenderKillSwitchOnly(t *testing.T) {
-	cfg := managerconfig.DefaultConfig()
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.KillSwitch = true
-	cfg.TProxy.LANIfnames = []string{"eth2"}
+// The kill switch must let UDP-bypass devices' UDP through, otherwise the
+// "block forwarded traffic" drop would defeat the per-device UDP bypass.
+func TestRenderKillSwitchAllowsUDPBypass(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.KillSwitch = true
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "console", Enabled: true, IPv4: "192.168.1.50", Mode: "tproxy", BypassUDP: true},
+	}
 
 	data, err := RenderKillSwitch(cfg)
 	if err != nil {
 		t.Fatalf("render kill switch: %v", err)
 	}
-	got := string(data)
-	if strings.Contains(got, "singbox_manager_tproxy_prerouting") {
-		t.Fatalf("kill switch only render included tproxy chain:\n%s", got)
+	ks := string(data)
+	udpIdx := strings.Index(ks, "meta l4proto udp ip saddr @singbox_manager_udpbypass4 return")
+	dropIdx := strings.Index(ks, "counter drop")
+	if udpIdx < 0 || dropIdx < 0 || udpIdx > dropIdx {
+		t.Fatalf("kill switch must return UDP-bypass traffic before dropping:\n%s", ks)
 	}
-	if !strings.Contains(got, "chain singbox_manager_kill_switch_forward") || !strings.Contains(got, "counter drop") {
-		t.Fatalf("kill switch only render missing drop chain:\n%s", got)
+}
+
+func TestRenderOffReturnsNothing(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "off"
+	data, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if data != nil {
+		t.Fatalf("expected nil render when nothing is proxied, got:\n%s", data)
 	}
 }

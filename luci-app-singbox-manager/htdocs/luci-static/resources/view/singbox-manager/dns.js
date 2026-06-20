@@ -98,7 +98,13 @@ function devicePicker(devices, fieldName) {
 	return E('div', { 'class': 'singbox-manager-devicepicker' }, [
 		E('div', { 'class': 'singbox-manager-devicepicker-label' }, _('LAN devices — click to add')),
 		E('div', { 'class': 'singbox-manager-chips' }, devices.map(function(device) {
-			var label = device.name ? (device.name + ' · ' + device.ip) : device.ip;
+			var parts = [];
+			if (device.name)
+				parts.push(device.name);
+			parts.push(device.ip);
+			if (device.mac)
+				parts.push(device.mac);
+			var label = parts.join(' · ');
 			return E('button', {
 				'type': 'button',
 				'class': 'btn cbi-button singbox-manager-chip',

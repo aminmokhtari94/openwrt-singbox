@@ -119,12 +119,21 @@ config route_rule 'r20_iran_site_direct'
 	list ruleset 'geosite-ir'
 	option outbound 'direct'
 
-config tproxy 'tproxy'
-	option enabled '0'
+config transparent 'transparent'
+	option default_mode 'off'
 	list lan_ifname 'br-lan'
-	list exclude_subnet '192.168.0.0/16'
 	option dns_hijack '0'
 	option kill_switch '0'
+
+# Per-device overrides (add one section per pinned client):
+# config proxy_device 'console'
+# 	option enabled '1'
+# 	option name 'Game console'
+# 	option mac 'aa:bb:cc:dd:ee:ff'
+# 	option mode 'tproxy'
+# 	# Send this device's UDP directly (TCP still proxied) — good for
+# 	# gaming consoles where proxied UDP breaks NAT type and adds latency.
+# 	option bypass_udp '1'
 
 config tun 'tun'
 	option enabled '0'

@@ -3,13 +3,13 @@
 		"description": "Grant access to SingBox Manager",
 		"read": {
 			"ubus": {
-				"singbox.manager": [ "status", "runtime_stats", "logs", "devices", "subscriptions", "nodes", "latency_test", "dns", "routing", "tproxy", "tun" ]
+				"singbox.manager": [ "status", "runtime_stats", "logs", "devices", "subscriptions", "nodes", "latency_test", "dns", "routing", "transparent", "tun" ]
 			},
 			"uci": [ "singbox-manager" ]
 		},
 		"write": {
 			"ubus": {
-				"singbox.manager": [ "start", "stop", "restart", "reload", "validate", "manager_set_enabled", "manager_set_mode", "group_set", "subscription_set", "subscription_delete", "subscription_import", "refresh_subscription", "refresh_subscriptions", "node_set", "node_delete", "node_select", "node_ping_test", "node_latency_test", "health_check", "dns_server_set", "dns_server_delete", "dns_rule_set", "dns_rule_delete", "dns_test", "route_rule_set", "route_rule_delete", "ruleset_set", "ruleset_delete", "refresh_ruleset", "tproxy_set", "tun_set" ]
+				"singbox.manager": [ "start", "stop", "restart", "reload", "validate", "manager_set_enabled", "manager_set_mode", "group_set", "subscription_set", "subscription_delete", "subscription_import", "refresh_subscription", "refresh_subscriptions", "node_set", "node_delete", "node_select", "node_ping_test", "node_latency_test", "health_check", "dns_server_set", "dns_server_delete", "dns_rule_set", "dns_rule_delete", "dns_test", "route_rule_set", "route_rule_delete", "ruleset_set", "ruleset_delete", "refresh_ruleset", "transparent_set", "tun_set" ]
 			},
 			"uci": [ "singbox-manager" ]
 		}

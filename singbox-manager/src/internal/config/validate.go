@@ -170,33 +170,7 @@ func Validate(cfg Config) error {
 		}
 	}
 
-	if cfg.TProxy.Enabled && cfg.TUN.Enabled {
-		errors = append(errors, "tproxy.main and tun.main cannot both be enabled")
-	}
-	if cfg.TProxy.Enabled && cfg.Manager.TProxyPort == 0 {
-		errors = append(errors, "manager.main.tproxy_port is required when tproxy is enabled")
-	}
-	if cfg.TProxy.Enabled && len(cfg.TProxy.LANIfnames) == 0 {
-		errors = append(errors, "tproxy.main.lan_ifname is required when tproxy is enabled")
-	}
-	if cfg.TProxy.Enabled && cfg.TProxy.DNSHijack && cfg.Manager.DNSPort == 0 {
-		errors = append(errors, "manager.main.dns_port is required when DNS hijacking is enabled")
-	}
-	for _, subnet := range cfg.TProxy.IncludeSubnet {
-		if _, err := netip.ParsePrefix(subnet); err != nil {
-			errors = append(errors, fmt.Sprintf("tproxy.main.include_subnet is invalid: %q", subnet))
-		}
-	}
-	for _, subnet := range cfg.TProxy.ExcludeSubnet {
-		if _, err := netip.ParsePrefix(subnet); err != nil {
-			errors = append(errors, fmt.Sprintf("tproxy.main.exclude_subnet is invalid: %q", subnet))
-		}
-	}
-	for _, mac := range cfg.TProxy.IncludeMAC {
-		if _, err := net.ParseMAC(mac); err != nil {
-			errors = append(errors, fmt.Sprintf("tproxy.main.include_mac is invalid: %q", mac))
-		}
-	}
+	validateTransparent(&errors, cfg)
 	if cfg.TUN.Inet4Address != "" {
 		prefix, err := netip.ParsePrefix(cfg.TUN.Inet4Address)
 		if err != nil || !prefix.Addr().Is4() {
@@ -214,6 +188,73 @@ func Validate(cfg Config) error {
 		return ValidationError{Errors: errors}
 	}
 	return nil
+}
+
+func validateTransparent(errors *[]string, cfg Config) {
+	tp := cfg.Transparent
+	if !inSet(tp.DefaultMode, "off", "tproxy") {
+		*errors = append(*errors, fmt.Sprintf("transparent.main.default_mode must be off or tproxy, got %q", tp.DefaultMode))
+	}
+
+	seen := map[string]bool{}
+	for _, device := range tp.Devices {
+		if device.ID != "" {
+			if seen[device.ID] {
+				*errors = append(*errors, fmt.Sprintf("proxy_device.%s is duplicated", device.ID))
+			}
+			seen[device.ID] = true
+		}
+		if !inSet(device.Mode, "default", "tproxy", "bypass") {
+			*errors = append(*errors, fmt.Sprintf("proxy_device.%s.mode must be default, tproxy, or bypass, got %q", device.ID, device.Mode))
+		}
+		if !device.Enabled {
+			continue
+		}
+		if device.MAC == "" && device.IPv4 == "" && device.IPv6 == "" {
+			*errors = append(*errors, fmt.Sprintf("proxy_device.%s needs at least one of mac, ipv4, or ipv6", device.ID))
+		}
+		if device.MAC != "" {
+			if _, err := net.ParseMAC(device.MAC); err != nil {
+				*errors = append(*errors, fmt.Sprintf("proxy_device.%s.mac is invalid: %q", device.ID, device.MAC))
+			}
+		}
+		if device.IPv4 != "" {
+			if addr, err := netip.ParseAddr(device.IPv4); err != nil || !addr.Is4() {
+				*errors = append(*errors, fmt.Sprintf("proxy_device.%s.ipv4 is invalid: %q", device.ID, device.IPv4))
+			}
+		}
+		if device.IPv6 != "" {
+			if addr, err := netip.ParseAddr(device.IPv6); err != nil || !addr.Is6() {
+				*errors = append(*errors, fmt.Sprintf("proxy_device.%s.ipv6 is invalid: %q", device.ID, device.IPv6))
+			}
+		}
+		if device.Group != "" {
+			if _, ok := cfg.Groups[device.Group]; !ok {
+				*errors = append(*errors, fmt.Sprintf("proxy_device.%s.group references missing group %q", device.ID, device.Group))
+			}
+		}
+	}
+
+	if !tp.Active() {
+		return
+	}
+	if cfg.TUN.Enabled {
+		*errors = append(*errors, "transparent proxying and tun.main cannot both be enabled")
+	}
+	if len(tp.LANIfnames) == 0 {
+		*errors = append(*errors, "transparent.main.lan_ifname is required when proxying is enabled")
+	}
+	if cfg.UsesTProxy() && cfg.Manager.TProxyPort == 0 {
+		*errors = append(*errors, "manager.main.tproxy_port is required when tproxy is in use")
+	}
+	if tp.DNSHijack && cfg.Manager.DNSPort == 0 {
+		*errors = append(*errors, "manager.main.dns_port is required when DNS hijacking is enabled")
+	}
+	for _, subnet := range tp.BypassSubnet {
+		if _, err := netip.ParsePrefix(subnet); err != nil {
+			*errors = append(*errors, fmt.Sprintf("transparent.main.bypass_subnet is invalid: %q", subnet))
+		}
+	}
 }
 
 func validateRuleGroup(errors *[]string, kind string, id string, groupID string, cfg Config) {

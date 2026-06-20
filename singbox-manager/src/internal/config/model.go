@@ -14,7 +14,7 @@ type Config struct {
 	DNSRules      map[string]DNSRule
 	RouteRules    map[string]RouteRule
 	RuleSets      map[string]RuleSet
-	TProxy        TProxy
+	Transparent   Transparent
 	TUN           TUN
 }
 
@@ -141,14 +141,81 @@ type RuleSet struct {
 	LastError      string `json:"last_error"`
 }
 
-type TProxy struct {
-	Enabled       bool
-	LANIfnames    []string
-	IncludeSubnet []string
-	ExcludeSubnet []string
-	IncludeMAC    []string
-	DNSHijack     bool
-	KillSwitch    bool
+// Transparent configures transparent proxying for LAN clients. A global
+// DefaultMode applies to every LAN client that is not listed as a device;
+// each Device may override that default (including opting out via "bypass").
+type Transparent struct {
+	DefaultMode  string // off | tproxy
+	LANIfnames   []string
+	Devices      []Device
+	BypassSubnet []string // destination subnets that always egress directly
+	DNSHijack    bool
+	KillSwitch   bool
+}
+
+// Device pins a specific LAN client to a transparent-proxy mode. It is matched
+// by MAC address and/or source IP. Mode "default" inherits Transparent.DefaultMode.
+type Device struct {
+	ID      string `json:"id"`
+	Enabled bool   `json:"enabled"`
+	Name    string `json:"name"`
+	MAC     string `json:"mac"`
+	IPv4    string `json:"ipv4"`
+	IPv6    string `json:"ipv6"`
+	Mode    string `json:"mode"` // default | tproxy | bypass
+	// BypassUDP sends the device's UDP traffic directly while its TCP is still
+	// tproxied. Useful for gaming consoles, where proxied UDP breaks NAT type
+	// and adds latency. Only meaningful when the device's effective mode is
+	// tproxy; ignored otherwise.
+	BypassUDP bool   `json:"bypass_udp"`
+	Group     string `json:"group"` // optional; drives a sing-box route rule, not the firewall
+}
+
+// Effective resolves a device's mode, expanding "default"/"" to the global
+// DefaultMode. The result is one of tproxy, bypass, or off.
+func (t Transparent) Effective(d Device) string {
+	mode := d.Mode
+	if mode == "" || mode == "default" {
+		mode = t.DefaultMode
+	}
+	if mode == "" {
+		return "off"
+	}
+	return mode
+}
+
+// uses reports whether the given transparent mode is in effect for the global
+// default or for any enabled device.
+func (t Transparent) uses(mode string) bool {
+	if t.DefaultMode == mode {
+		return true
+	}
+	for _, device := range t.Devices {
+		if device.Enabled && t.Effective(device) == mode {
+			return true
+		}
+	}
+	return false
+}
+
+// Active reports whether any traffic is transparently proxied at all.
+func (t Transparent) Active() bool {
+	return t.uses("tproxy")
+}
+
+// UsesTProxy reports whether the tproxy inbound and policy routing are needed.
+func (cfg Config) UsesTProxy() bool { return cfg.Transparent.uses("tproxy") }
+
+// UDPBypassDevices returns the enabled devices whose UDP must egress directly
+// (BypassUDP set) while their effective mode is tproxy.
+func (t Transparent) UDPBypassDevices() []Device {
+	var devices []Device
+	for _, device := range t.Devices {
+		if device.Enabled && device.BypassUDP && t.Effective(device) == "tproxy" {
+			devices = append(devices, device)
+		}
+	}
+	return devices
 }
 
 type TUN struct {
@@ -182,8 +249,8 @@ func DefaultConfig() Config {
 		DNSRules:      map[string]DNSRule{},
 		RouteRules:    map[string]RouteRule{},
 		RuleSets:      map[string]RuleSet{},
-		TProxy: TProxy{
-			Enabled: false,
+		Transparent: Transparent{
+			DefaultMode: "off",
 		},
 		TUN: TUN{
 			Enabled:      false,

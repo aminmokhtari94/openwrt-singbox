@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=singbox-manager
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=3
+PKG_RELEASE:=4
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_DEPENDS:=golang/host
@@ -51,6 +51,18 @@ define Package/singbox-manager/install
 	$(INSTALL_DIR) $(1)/etc/singbox-manager/rulesets
 	$(INSTALL_DIR) $(1)/usr/libexec/rpcd
 	$(LN) /usr/bin/singbox-managerd $(1)/usr/libexec/rpcd/singbox.manager
+endef
+
+# Restart the long-running daemon on (re)install so it re-execs the new binary.
+# Without this, an upgrade leaves the old `serve` process running a deleted
+# inode and write RPCs added in the new build return "unknown method".
+define Package/singbox-manager/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] || {
+	/etc/init.d/singbox-managerd enable
+	/etc/init.d/singbox-managerd restart
+}
+exit 0
 endef
 
 $(eval $(call GoBinPackage,singbox-manager))

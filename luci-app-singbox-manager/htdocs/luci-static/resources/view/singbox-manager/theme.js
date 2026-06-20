@@ -79,6 +79,20 @@ var CSS = [
 	'.singbox-manager-import-link textarea{min-height:96px;resize:vertical}',
 	'.singbox-manager-import-help{grid-column:1/-1;margin:0;font-size:12px;color:var(--text-color-medium)}',
 
+	/* ---- per-device override editor ---- */
+	'.singbox-manager-device-editor{display:grid;gap:10px;padding-top:12px;border-top:1px solid var(--border-color-medium)}',
+	'.singbox-manager-device-editor>h4{margin:0;font-size:13px;font-weight:600}',
+	'.singbox-manager-devices{display:grid;gap:6px;overflow-x:auto}',
+	// Fixed last two tracks (toggle, Remove) so the fr columns resolve to the
+	// same widths in the header row (whose trailing cells are empty) as in the
+	// data rows — otherwise the columns would not line up.
+	'.singbox-manager-device-row{display:grid;grid-template-columns:minmax(90px,1.1fr) minmax(140px,1.3fr) minmax(104px,1fr) minmax(104px,1fr) minmax(96px,.9fr) minmax(90px,.9fr) 48px 48px 96px;gap:8px;align-items:center}',
+	'.singbox-manager-device-row input.cbi-input-text,.singbox-manager-device-row select{width:100%;box-sizing:border-box;min-width:0;margin:0}',
+	'.singbox-manager-device-row .singbox-manager-toggle{justify-self:center}',
+	'.singbox-manager-device-row .cbi-button-remove{justify-self:end;white-space:nowrap}',
+	'.singbox-manager-device-head{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--text-color-medium);font-weight:600;border-bottom:1px solid var(--border-color-medium);padding-bottom:6px}',
+	'.singbox-manager-device-head span:nth-child(7),.singbox-manager-device-head span:nth-child(8){text-align:center}',
+
 	/* ---- device picker chips ---- */
 	'.singbox-manager-devicepicker{display:grid;gap:6px;margin-top:-4px}',
 	'.singbox-manager-devicepicker-label{font-size:11px;color:var(--text-color-medium)}',

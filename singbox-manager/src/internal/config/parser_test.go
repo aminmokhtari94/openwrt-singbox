@@ -57,9 +57,16 @@ config dns_server 'udp'
 	option type 'udp'
 	option address '223.5.5.5'
 
-config tproxy 'tproxy'
-	option enabled '0'
+config transparent 'transparent'
+	option default_mode 'off'
 	option kill_switch '1'
+	list lan_ifname 'br-lan'
+
+config proxy_device 'console'
+	option enabled '1'
+	option name 'Console'
+	option mac 'aa:bb:cc:dd:ee:01'
+	option mode 'tproxy'
 
 config tun 'tun'
 	option enabled '0'
@@ -97,8 +104,14 @@ config tun 'tun'
 	if cfg.DNSRules["phone_dns"].Server != "udp" {
 		t.Fatalf("dns rule server = %q, want udp", cfg.DNSRules["phone_dns"].Server)
 	}
-	if !cfg.TProxy.KillSwitch {
-		t.Fatal("expected tproxy kill switch")
+	if !cfg.Transparent.KillSwitch {
+		t.Fatal("expected transparent kill switch")
+	}
+	if len(cfg.Transparent.Devices) != 1 || cfg.Transparent.Devices[0].ID != "console" {
+		t.Fatalf("expected one proxy device, got %#v", cfg.Transparent.Devices)
+	}
+	if cfg.Transparent.Devices[0].Mode != "tproxy" {
+		t.Fatalf("device mode = %q, want tproxy", cfg.Transparent.Devices[0].Mode)
 	}
 }
 
@@ -132,8 +145,8 @@ config manager 'main'
 config group 'home'
 	option name 'Home'
 
-config tproxy 'tproxy'
-	option enabled '0'
+config transparent 'transparent'
+	option default_mode 'off'
 
 config tun 'tun'
 	option enabled '0'
@@ -261,10 +274,11 @@ config manager 'main'
 	}
 }
 
-func TestValidateRejectsTProxyAndTUNConflict(t *testing.T) {
+func TestValidateRejectsTransparentAndTUNConflict(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
-	cfg.TProxy.Enabled = true
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.LANIfnames = []string{"br-lan"}
 	cfg.TUN.Enabled = true
 
 	err := Validate(cfg)
@@ -354,23 +368,26 @@ config dns_rule 'device_124_dns'
 	}
 }
 
-func TestValidateRejectsInvalidTProxyFilters(t *testing.T) {
+func TestValidateRejectsInvalidTransparent(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Groups["home"] = Group{ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy"}
-	cfg.TProxy.Enabled = true
-	cfg.TProxy.IncludeSubnet = []string{"not-a-cidr"}
-	cfg.TProxy.ExcludeSubnet = []string{"192.168.1.1"}
-	cfg.TProxy.IncludeMAC = []string{"not-a-mac"}
+	cfg.Transparent.DefaultMode = "tproxy" // active, but no LAN interface
+	cfg.Transparent.BypassSubnet = []string{"not-a-cidr"}
+	cfg.Transparent.Devices = []Device{
+		{ID: "bad", Enabled: true, Mode: "tproxy", MAC: "not-a-mac", IPv4: "::1"},
+		{ID: "empty", Enabled: true, Mode: "default"},
+	}
 
 	err := Validate(cfg)
 	if err == nil {
 		t.Fatal("expected validation error")
 	}
 	for _, want := range []string{
-		"tproxy.main.lan_ifname is required",
-		"tproxy.main.include_subnet is invalid",
-		"tproxy.main.exclude_subnet is invalid",
-		"tproxy.main.include_mac is invalid",
+		"transparent.main.lan_ifname is required",
+		"transparent.main.bypass_subnet is invalid",
+		"proxy_device.bad.mac is invalid",
+		"proxy_device.bad.ipv4 is invalid",
+		"proxy_device.empty needs at least one of mac, ipv4, or ipv6",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want %q", err, want)
@@ -507,6 +524,7 @@ config manager 'main'
 
 config group 'home'
 	option name 'Home'
+	option selected_node 'from-sub'
 	list subscription 'sub'
 
 config subscription 'sub'
@@ -543,6 +561,46 @@ config node 'manual'
 	}
 	if len(cfg.Groups["home"].Subscriptions) != 0 {
 		t.Fatalf("group subscriptions = %#v, want empty", cfg.Groups["home"].Subscriptions)
+	}
+	if cfg.Groups["home"].SelectedNode != "" {
+		t.Fatalf("group selected_node = %q, want cleared", cfg.Groups["home"].SelectedNode)
+	}
+}
+
+func TestDeleteManualNodeClearsGroupSelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "singbox-manager")
+	data := `
+config manager 'main'
+	option active_group 'home'
+
+config group 'home'
+	option name 'Home'
+	option selected_node 'manual'
+
+config node 'manual'
+	option type 'direct'
+
+config node 'keep'
+	option type 'direct'
+`
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if err := DeleteManualNode(path, "manual"); err != nil {
+		t.Fatalf("delete manual node: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("load updated config: %v", err)
+	}
+	if _, ok := cfg.Nodes["manual"]; ok {
+		t.Fatal("manual node still exists")
+	}
+	if cfg.Groups["home"].SelectedNode != "" {
+		t.Fatalf("group selected_node = %q, want cleared", cfg.Groups["home"].SelectedNode)
 	}
 }
 
