@@ -62,9 +62,25 @@ jobs:
       - name: Stage release assets
         run: |
           mkdir -p assets
-          find artifacts -type f \( -name '*.ipk' -o -name '*.apk' \) \
-            -exec cp -v {} assets/ \;
+          # Artifacts land in artifacts/packages-<arch>/. The daemon package
+          # filename does not encode the arch, so suffix it to avoid collisions
+          # across arches. The luci-app is architecture-independent (PKGARCH:=all)
+          # so a single copy is shipped.
+          for d in artifacts/packages-*; do
+            [ -d "$d" ] || continue
+            arch="${d##*/packages-}"
+            for f in "$d"/singbox-manager-*.apk "$d"/singbox-manager-*.ipk \
+                     "$d"/singbox-manager_*.ipk; do
+              [ -e "$f" ] || continue
+              base="$(basename "$f")"; ext="${base##*.}"
+              cp -v "$f" "assets/${base%.*}_${arch}.${ext}"
+            done
+          done
+          luci="$(ls artifacts/packages-*/luci-app-singbox-manager-*.apk \
+                     artifacts/packages-*/luci-app-singbox-manager_*.ipk 2>/dev/null | head -1)"
+          [ -n "$luci" ] && cp -v "$luci" assets/
           ls -l assets
+          test -n "$(ls -A assets)" || { echo 'No release assets staged'; exit 1; }
 
       - name: Create GitHub release
         env:

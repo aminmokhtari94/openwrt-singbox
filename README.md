@@ -46,17 +46,23 @@ transparent (TProxy) gateway with per-device overrides — without hand-editing
 
 ## Install
 
-Grab the latest `.ipk` (opkg) or `.apk` (apk) packages for your architecture from the
-[Releases](https://github.com/aminmokhtari94/openwrt-singbox/releases/latest) page.
-Prebuilt for `x86_64`, `aarch64`, `armv7`, and `mipsel`.
+Download the packages from the
+[Releases](https://github.com/aminmokhtari94/openwrt-singbox/releases/latest) page. The
+release build targets OpenWrt 25.12, which uses the `apk` package manager, and ships:
+
+- `singbox-manager-<version>_<arch>.apk` — the daemon, one per architecture
+  (`x86_64`, `aarch64`, `armv7`, `mipsel`)
+- `luci-app-singbox-manager-<version>.apk` — the web UI (architecture-independent)
 
 ```sh
-# opkg-based OpenWrt
-opkg install ./singbox-manager_*.ipk ./luci-app-singbox-manager_*.ipk
-
-# apk-based OpenWrt (snapshot / newer releases)
-apk add --allow-untrusted ./singbox-manager-*.apk ./luci-app-singbox-manager-*.apk
+# pick the daemon matching your device's architecture
+apk add --allow-untrusted \
+  ./singbox-manager-*_x86_64.apk \
+  ./luci-app-singbox-manager-*.apk
 ```
+
+> On OpenWrt releases older than 24.10 (which use `opkg`/`.ipk`), build for your target
+> with `make ipk-<arch>` and install the resulting `.ipk` with `opkg`.
 
 Then open **LuCI → Services → SingBox Manager**. Configuration lives in
 `/etc/config/singbox-manager`.
