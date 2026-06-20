@@ -7,7 +7,11 @@ PKG_RELEASE:=4
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_DEPENDS:=golang/host
 PKG_BUILD_PARALLEL:=1
-PKG_USE_MIPS16:=0
+# cgo is incompatible with MIPS16 (Go's gcc_mipsx.S fails to assemble), so
+# disable it for MIPS targets like ramips/mt7621. PKG_BUILD_FLAGS:=no-mips16 is
+# the mechanism the upstream sing-box package uses; the older PKG_USE_MIPS16:=0
+# is not honored on current OpenWrt.
+PKG_BUILD_FLAGS:=no-mips16
 
 GO_PKG:=github.com/openwrt-singbox/singbox-manager
 GO_PKG_BUILD_PKG:=github.com/openwrt-singbox/singbox-manager/cmd/singbox-managerd
