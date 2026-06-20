@@ -61,8 +61,14 @@ apk add --allow-untrusted ./singbox-manager-*.apk ./luci-app-singbox-manager-*.a
 Then open **LuCI → Services → SingBox Manager**. Configuration lives in
 `/etc/config/singbox-manager`.
 
-> Requires `sing-box` (a dependency of the package) and `kmod-nft-tproxy` for transparent
-> proxying.
+> `sing-box` is pulled in automatically as a dependency. For **transparent (TProxy)
+> mode**, also install the `kmod-nft-tproxy` kernel module — it is not a package
+> dependency because the OpenWrt SDK can't build kernel modules, so it must be installed
+> from the stock feed:
+>
+> ```sh
+> opkg install kmod-nft-tproxy   # or: apk add kmod-nft-tproxy
+> ```
 
 ## Build from source
 
