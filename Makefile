@@ -38,11 +38,17 @@ TARGET_PATH_aarch64 := armsr/armv8
 TARGET_PATH_armv7   := armsr/armv7
 TARGET_PATH_mipsel  := ramips/mt7621
 
+# SDK archive names embed the libc variant. Most targets use plain "musl";
+# 32-bit ARM EABI (armv7) ships as "musl_eabi". Override LIBC_<arch> for any
+# target whose suffix differs from the musl default.
+LIBC_armv7 := musl_eabi
+
 # ---------------------------------------------------------------------------
 # Local OpenWrt SDK (downloaded into .sdk)
 # ---------------------------------------------------------------------------
 SDK_DIR ?= .sdk
-OPENWRT_SDK_NAME := openwrt-sdk-$(OPENWRT_VERSION)-$(OPENWRT_TARGET_DASH)_gcc-$(OPENWRT_GCC_VERSION)_musl.$(OPENWRT_SDK_HOST)
+OPENWRT_LIBC ?= musl
+OPENWRT_SDK_NAME := openwrt-sdk-$(OPENWRT_VERSION)-$(OPENWRT_TARGET_DASH)_gcc-$(OPENWRT_GCC_VERSION)_$(OPENWRT_LIBC).$(OPENWRT_SDK_HOST)
 OPENWRT_SDK_ARCHIVE := $(SDK_DIR)/$(OPENWRT_SDK_NAME).tar.zst
 DEFAULT_OPENWRT_SDK := $(SDK_DIR)/$(OPENWRT_SDK_NAME)
 OPENWRT_SDK ?= $(DEFAULT_OPENWRT_SDK)
@@ -190,6 +196,7 @@ sdk-link: ensure-sdk
 # appends just the packages it wants before running defconfig / compile.
 # ---------------------------------------------------------------------------
 define sdk_config_reset
+	touch "$(OPENWRT_SDK)/.config"
 	sed -i \
 		-e '/^CONFIG_ALL=/d' \
 		-e '/^CONFIG_ALL_KMODS=/d' \
@@ -263,7 +270,7 @@ ipk-all:
 # Build for a single arch preset, e.g. `make ipk-aarch64`.
 ipk-%:
 	@test -n "$(TARGET_PATH_$*)" || { echo "Unknown arch '$*'. Known: $(ARCHS) (or set TARGET_PATH_$*=<target/subtarget>)"; exit 1; }
-	$(MAKE) ipk OPENWRT_TARGET_PATH="$(TARGET_PATH_$*)" IPK_DIR="$(IPK_DIR)/$*"
+	$(MAKE) ipk OPENWRT_TARGET_PATH="$(TARGET_PATH_$*)" OPENWRT_LIBC="$(or $(LIBC_$*),musl)" IPK_DIR="$(IPK_DIR)/$*"
 
 # ---------------------------------------------------------------------------
 # OpenWrt test VM

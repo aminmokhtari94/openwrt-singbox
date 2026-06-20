@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -49,6 +50,8 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-latest
+    # Only publish on a real tag push; workflow_dispatch runs are build-only checks.
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
 
