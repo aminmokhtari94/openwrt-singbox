@@ -192,16 +192,45 @@ func writeSetElements(builder *strings.Builder, values []string) {
 // by sing-box's hijack-dns route rule, so this chain emits no nat statement and
 // therefore loads cleanly in a filter/mangle chain.
 //
-// Per-device UDP bypass is applied first: a device in the udpbypass set has its
-// UDP returned (egresses directly) before any tproxy decision, while its TCP
-// falls through to the normal tproxy path.
+// Ordering matters. Per-device opt-outs (UDP bypass, and in catch-all mode the
+// bypass carve-outs) run first so they apply to all traffic, DNS included. Then,
+// crucially, DNS is captured *before* the local/reserved destination returns:
+// LAN clients normally resolve through the router itself — a local, private
+// address — so without an early port-53 tproxy their DNS would be returned here
+// and never reach sing-box. Everything else still bypasses router-local and
+// private/reserved destinations as before.
 func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchAll bool) {
 	builder.WriteString("chain singbox_manager_tproxy {\n")
 	builder.WriteString("\ttype filter hook prerouting priority mangle; policy accept;\n")
-	writeScopeFilters(builder, cfg)
+	fmt.Fprintf(builder, "\tiifname != %s return\n", nftStringSet(cfg.Transparent.LANIfnames))
+	builder.WriteString("\tfib daddr type { broadcast, multicast } return\n")
+
 	writeUDPBypass(builder)
 	if catchAll {
 		writeCarveOuts(builder, setBypassMAC, setBypass4, setBypass6)
+	}
+
+	// Destinations the user pins as direct egress directly — DNS included.
+	fmt.Fprintf(builder, "\tip daddr @%s return\n", setBypassDst4)
+	fmt.Fprintf(builder, "\tip6 daddr @%s return\n", setBypassDst6)
+
+	// Capture in-scope DNS before the local/reserved returns so queries aimed at
+	// the router (the default LAN resolver) are tproxied and hijacked too.
+	if cfg.Transparent.DNSHijack {
+		if catchAll {
+			fmt.Fprintf(builder, "\tmeta l4proto { tcp, udp } th dport 53 goto %s\n", tproxyDo)
+		} else {
+			writeDNSGotos(builder, tproxyDo, setTProxyMAC, setTProxy4, setTProxy6)
+		}
+	}
+
+	// Non-DNS traffic to the router itself or to private/reserved ranges is not
+	// proxied.
+	builder.WriteString("\tfib daddr type local return\n")
+	fmt.Fprintf(builder, "\tip daddr %s return\n", reservedV4)
+	fmt.Fprintf(builder, "\tip6 daddr %s return\n", reservedV6)
+
+	if catchAll {
 		fmt.Fprintf(builder, "\tgoto %s\n", tproxyDo)
 	} else {
 		writeGotos(builder, tproxyDo, setTProxyMAC, setTProxy4, setTProxy6)
@@ -257,6 +286,15 @@ func writeGotos(builder *strings.Builder, target string, macSet string, v4Set st
 	fmt.Fprintf(builder, "\tether saddr @%s goto %s\n", macSet, target)
 	fmt.Fprintf(builder, "\tip saddr @%s goto %s\n", v4Set, target)
 	fmt.Fprintf(builder, "\tip6 saddr @%s goto %s\n", v6Set, target)
+}
+
+// writeDNSGotos sends in-scope devices' DNS (TCP+UDP port 53) to the tproxy
+// target. It mirrors writeGotos but matches only port 53, so it can run before
+// the local/reserved returns and still capture DNS aimed at the router.
+func writeDNSGotos(builder *strings.Builder, target string, macSet string, v4Set string, v6Set string) {
+	fmt.Fprintf(builder, "\tether saddr @%s meta l4proto { tcp, udp } th dport 53 goto %s\n", macSet, target)
+	fmt.Fprintf(builder, "\tip saddr @%s meta l4proto { tcp, udp } th dport 53 goto %s\n", v4Set, target)
+	fmt.Fprintf(builder, "\tip6 saddr @%s meta l4proto { tcp, udp } th dport 53 goto %s\n", v6Set, target)
 }
 
 func writeDrops(builder *strings.Builder, macSet string, v4Set string, v6Set string) {

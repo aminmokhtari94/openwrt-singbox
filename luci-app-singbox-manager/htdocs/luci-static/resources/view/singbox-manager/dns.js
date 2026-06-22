@@ -354,7 +354,7 @@ function renderResolution(view, data) {
 		E('div', { 'class': 'singbox-manager-section-header' }, [
 			E('h3', {}, _('DNS Resolution')),
 			E('span', { 'class': 'singbox-manager-badge' + (capture ? ' on' : ' off') },
-				capture ? _('Capture: on (port %d)').format(data.dns_inbound_port || 1053) : _('Capture: off'))
+				capture ? _('Capture: on (tproxy)') : _('Capture: off'))
 		]),
 		renderWarnings(data && data.warnings),
 		E('label', { 'class': 'singbox-manager-inline-control' }, [

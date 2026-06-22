@@ -64,13 +64,6 @@
       "sniff": true,
       "tag": "tproxy-in",
       "type": "tproxy"
-    },
-    {
-      "listen": "::",
-      "listen_port": 1053,
-      "sniff": true,
-      "tag": "dns-in",
-      "type": "direct"
     }
   ],
   "outbounds": [

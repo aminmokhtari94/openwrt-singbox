@@ -484,10 +484,12 @@ func TestRenderDomainResolverForDirectOutbound(t *testing.T) {
 	}
 }
 
-func TestRenderDNSHijackInboundAndRoute(t *testing.T) {
+// DNS hijack renders the hijack-dns route rule but no dedicated DNS inbound:
+// the firewall tproxies port 53 into the tproxy inbound, and hijack-dns answers
+// it there, so a separate dns-in inbound is redundant.
+func TestRenderDNSHijackRouteNoDedicatedInbound(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"
-	cfg.Manager.DNSPort = 1053
 	cfg.Transparent.DefaultMode = "tproxy"
 	cfg.Transparent.LANIfnames = []string{"br-lan"}
 	cfg.Transparent.DNSHijack = true
@@ -502,8 +504,8 @@ func TestRenderDNSHijackInboundAndRoute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if !strings.Contains(string(data), `"tag": "dns-in"`) {
-		t.Fatalf("rendered config missing DNS inbound:\n%s", data)
+	if strings.Contains(string(data), `"tag": "dns-in"`) {
+		t.Fatalf("rendered config still emits the removed dns-in inbound:\n%s", data)
 	}
 	if !strings.Contains(string(data), `"action": "hijack-dns"`) {
 		t.Fatalf("rendered config missing DNS hijack route:\n%s", data)

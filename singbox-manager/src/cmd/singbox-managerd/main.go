@@ -994,9 +994,12 @@ func renderedDNSDebug(cfg managerconfig.Config) ([]map[string]any, []map[string]
 	if err := json.Unmarshal(data, &document); err != nil {
 		return nil, nil, nil
 	}
+	// DNS is captured by the tproxy inbound (the firewall tproxies port 53 and
+	// sing-box's hijack-dns route rule answers it); there is no dedicated DNS
+	// inbound. Report the tproxy inbound so the UI shows where capture happens.
 	var inbound map[string]any
 	for _, candidate := range document.Inbounds {
-		if candidate["tag"] == "dns-in" {
+		if candidate["tag"] == "tproxy-in" {
 			inbound = candidate
 			break
 		}

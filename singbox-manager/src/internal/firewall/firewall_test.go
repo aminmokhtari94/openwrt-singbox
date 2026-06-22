@@ -67,6 +67,56 @@ func TestRenderDefaultTProxy(t *testing.T) {
 	)
 }
 
+// DNS capture: with hijack enabled, in-scope port-53 traffic must be tproxied
+// *before* the local/reserved returns, so DNS aimed at the router itself (the
+// default LAN resolver) still reaches sing-box instead of being returned.
+func TestRenderDNSCaptureBeforeLocalReturn(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = true
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"meta l4proto { tcp, udp } th dport 53 goto singbox_manager_tproxy_do",
+	)
+	dnsIdx := strings.Index(got, "th dport 53 goto singbox_manager_tproxy_do")
+	localIdx := strings.Index(got, "fib daddr type local return")
+	reservedIdx := strings.Index(got, "ip daddr "+reservedV4+" return")
+	if dnsIdx < 0 || localIdx < 0 || reservedIdx < 0 {
+		t.Fatalf("missing expected DNS-capture/return rules:\n%s", got)
+	}
+	if dnsIdx > localIdx || dnsIdx > reservedIdx {
+		t.Fatalf("DNS capture must precede the local/reserved returns:\n%s", got)
+	}
+}
+
+// Without hijack enabled there is no early port-53 tproxy: DNS aimed at the
+// router is returned like any other local traffic.
+func TestRenderNoDNSCaptureWhenHijackOff(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = false
+
+	requireNone(t, mustRender(t, cfg), "th dport 53")
+}
+
+// Whitelist mode with hijack scopes DNS capture to the tproxy set only.
+func TestRenderDNSCaptureWhitelistScoped(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "off"
+	cfg.Transparent.DNSHijack = true
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "phone", Enabled: true, IPv4: "192.168.1.50", Mode: "tproxy"},
+	}
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"ip saddr @singbox_manager_tproxy4 meta l4proto { tcp, udp } th dport 53 goto singbox_manager_tproxy_do",
+	)
+	// Still no catch-all goto in whitelist mode.
+	requireNone(t, got, "\tgoto singbox_manager_tproxy_do\n")
+}
+
 // Per-device UDP bypass: default tproxy with one device whose UDP egresses
 // directly. The device's address lands in the udpbypass set, and the tproxy
 // chain returns its UDP before the catch-all goto (so TCP is still tproxied).

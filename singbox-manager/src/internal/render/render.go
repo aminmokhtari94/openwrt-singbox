@@ -109,16 +109,6 @@ func renderInbounds(cfg managerconfig.Config) []map[string]any {
 		})
 	}
 
-	if dnsHijackEnabled(cfg) {
-		inbounds = append(inbounds, map[string]any{
-			"type":        "direct",
-			"tag":         "dns-in",
-			"listen":      "::",
-			"listen_port": cfg.Manager.DNSPort,
-			"sniff":       true,
-		})
-	}
-
 	if cfg.TUN.Enabled {
 		addresses := []string{}
 		if cfg.TUN.Inet4Address != "" {
