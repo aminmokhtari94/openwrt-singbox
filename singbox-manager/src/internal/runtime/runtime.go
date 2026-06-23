@@ -282,6 +282,14 @@ func applyFirewall(cfg managerconfig.Config, paths Paths, result *Result) error 
 		return err
 	}
 	if cfg.Transparent.Active() {
+		// kmod-nft-tproxy is required for the tproxy nftables expression but is
+		// not a package dependency (the SDK cannot build kernel modules), so a
+		// fresh install may lack it. Load it up front and fail with an actionable
+		// message rather than the opaque "Could not process rule: No such file or
+		// directory" that fw4 emits when the expression is unavailable.
+		if err := ensureTProxyModule(); err != nil {
+			return err
+		}
 		// Transparent proxying is tproxy-only, which needs policy routing
 		// (fwmark rule + local route table) so marked packets reach sing-box.
 		if err := applyTProxyRoutes(); err != nil {
@@ -402,6 +410,17 @@ func reloadFirewall() error {
 			return err
 		}
 		return fmt.Errorf("%w: %s", err, output)
+	}
+	return nil
+}
+
+// ensureTProxyModule loads the nft_tproxy kernel module that transparent-proxy
+// mode relies on. It is shipped by kmod-nft-tproxy, which is intentionally not a
+// package dependency (the OpenWrt SDK cannot build the kernel modules it pulls
+// in), so a fresh install may be missing it.
+func ensureTProxyModule() error {
+	if err := routeCommand("modprobe", "nft_tproxy"); err != nil {
+		return fmt.Errorf("transparent proxy requires the nft_tproxy kernel module (package kmod-nft-tproxy); install it with `apk add kmod-nft-tproxy` or `opkg install kmod-nft-tproxy`: %w", err)
 	}
 	return nil
 }

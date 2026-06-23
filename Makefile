@@ -268,13 +268,7 @@ ipk build-ipk: sdk-link
 		'CONFIG_PACKAGE_singbox-manager=m' \
 		'CONFIG_PACKAGE_luci-app-singbox-manager=m' \
 		>> "$(OPENWRT_SDK)/.config"
-	# IGNORE_ERRORS=m lets the build skip the unbuildable kmod-nft-tproxy
-	# dependency (the SDK has kernel headers only and cannot build kernel
-	# modules) without failing the whole run. singbox-manager still packages and
-	# keeps +kmod-nft-tproxy in its Depends, so the device pulls the stock kmod
-	# from the official feed at install time. The artifact guard below ensures we
-	# never publish an empty release if our own package genuinely fails to build.
-	$(MAKE) -C "$(OPENWRT_SDK)" package/singbox-manager/compile package/luci-app-singbox-manager/compile IGNORE_ERRORS=m V=s
+	$(MAKE) -C "$(OPENWRT_SDK)" package/singbox-manager/compile package/luci-app-singbox-manager/compile V=s
 	mkdir -p "$(IPK_DIR)"
 	find "$(OPENWRT_SDK)/bin/packages" -type f \( \
 		-name 'singbox-manager_*.ipk' -o \

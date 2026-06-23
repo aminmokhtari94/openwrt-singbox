@@ -132,13 +132,15 @@ After installing, open **LuCI → Services → SingBox Manager**. Configuration 
 > target with `make ipk-<arch> OPENWRT_VERSION=<release>` and install the resulting
 > `.ipk` with `opkg`.
 
-> `sing-box` and `kmod-nft-tproxy` (the kernel module **transparent / TProxy mode**
-> needs) are declared dependencies, so opkg/apk pulls them from the stock feed
-> automatically at install time. If you are offline or the kmod is somehow missing,
-> install it by hand:
+> `sing-box` is a declared dependency and is pulled automatically. **Transparent /
+> TProxy mode** additionally needs the `kmod-nft-tproxy` kernel module, which is
+> *not* a package dependency: it pulls sibling netfilter modules the OpenWrt SDK
+> cannot build, so depending on it would break every prebuilt package. Install it
+> by hand before enabling transparent proxying (the daemon reports a clear error
+> if it is missing):
 >
 > ```sh
-> opkg install kmod-nft-tproxy   # or: apk add kmod-nft-tproxy
+> apk add kmod-nft-tproxy        # or: opkg install kmod-nft-tproxy
 > ```
 
 ## Build from source

@@ -60,6 +60,33 @@ func TestApplyFirewallFlushesManagerSetsBeforeReload(t *testing.T) {
 	}
 }
 
+// A missing nft_tproxy module must surface an actionable error naming the
+// kmod-nft-tproxy package, not the opaque modprobe/fw4 failure.
+func TestApplyFirewallReportsMissingTProxyModule(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.LANIfnames = []string{"eth2"}
+
+	oldRouteCommand := routeCommand
+	routeCommand = func(args ...string) error {
+		if strings.Join(args, " ") == "modprobe nft_tproxy" {
+			return errors.New("exit status 1: modprobe: module nft_tproxy not found")
+		}
+		return nil
+	}
+	t.Cleanup(func() { routeCommand = oldRouteCommand })
+
+	path := filepath.Join(t.TempDir(), "90-singbox-manager.nft")
+	result := Result{}
+	err := applyFirewall(cfg, Paths{NftablesInclude: path}, &result)
+	if err == nil {
+		t.Fatal("expected error when nft_tproxy module is missing")
+	}
+	if !strings.Contains(err.Error(), "kmod-nft-tproxy") {
+		t.Fatalf("error should name the kmod-nft-tproxy package, got: %v", err)
+	}
+}
+
 func TestStatusAliveTreatsZombieAsStopped(t *testing.T) {
 	alive, ok := statusAlive([]byte("Name:\tsing-box\nState:\tZ (zombie)\n"))
 	if !ok {
