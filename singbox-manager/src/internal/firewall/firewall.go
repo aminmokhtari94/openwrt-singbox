@@ -192,20 +192,22 @@ func writeSetElements(builder *strings.Builder, values []string) {
 // by sing-box's hijack-dns route rule, so this chain emits no nat statement and
 // therefore loads cleanly in a filter/mangle chain.
 //
-// Ordering matters. Per-device opt-outs (UDP bypass, and in catch-all mode the
-// bypass carve-outs) run first so they apply to all traffic, DNS included. Then,
-// crucially, DNS is captured *before* the local/reserved destination returns:
-// LAN clients normally resolve through the router itself — a local, private
-// address — so without an early port-53 tproxy their DNS would be returned here
-// and never reach sing-box. Everything else still bypasses router-local and
-// private/reserved destinations as before.
+// Ordering matters. In catch-all mode the full-device bypass carve-outs run
+// first so a fully-bypassed device is direct for everything, DNS included. Then,
+// crucially, DNS is captured *before* the UDP-bypass and local/reserved returns:
+// a UDP-bypass device (proxied TCP, direct UDP) must still have its DNS — which
+// is UDP/53 — hijacked, or its resolution leaks direct and sing-box can't route
+// it. LAN clients also normally resolve through the router itself — a local,
+// private address — so without an early port-53 tproxy their DNS would be
+// returned by the local/reserved rules and never reach sing-box. Only after DNS
+// is captured do the remaining per-device UDP opt-outs and router-local/private
+// destinations bypass as before.
 func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchAll bool) {
 	builder.WriteString("chain singbox_manager_tproxy {\n")
 	builder.WriteString("\ttype filter hook prerouting priority mangle; policy accept;\n")
 	fmt.Fprintf(builder, "\tiifname != %s return\n", nftStringSet(cfg.Transparent.LANIfnames))
 	builder.WriteString("\tfib daddr type { broadcast, multicast } return\n")
 
-	writeUDPBypass(builder)
 	if catchAll {
 		writeCarveOuts(builder, setBypassMAC, setBypass4, setBypass6)
 	}
@@ -214,8 +216,9 @@ func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchA
 	fmt.Fprintf(builder, "\tip daddr @%s return\n", setBypassDst4)
 	fmt.Fprintf(builder, "\tip6 daddr @%s return\n", setBypassDst6)
 
-	// Capture in-scope DNS before the local/reserved returns so queries aimed at
-	// the router (the default LAN resolver) are tproxied and hijacked too.
+	// Capture in-scope DNS before the UDP-bypass and local/reserved returns so
+	// queries aimed at the router (the default LAN resolver) are tproxied and
+	// hijacked too — even for devices whose other UDP egresses directly.
 	if cfg.Transparent.DNSHijack {
 		if catchAll {
 			fmt.Fprintf(builder, "\tmeta l4proto { tcp, udp } th dport 53 goto %s\n", tproxyDo)
@@ -223,6 +226,10 @@ func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchA
 			writeDNSGotos(builder, tproxyDo, setTProxyMAC, setTProxy4, setTProxy6)
 		}
 	}
+
+	// UDP that opted out of proxying (gaming consoles etc.) egresses directly.
+	// This runs after DNS capture so port-53 UDP is still hijacked.
+	writeUDPBypass(builder)
 
 	// Non-DNS traffic to the router itself or to private/reserved ranges is not
 	// proxied.

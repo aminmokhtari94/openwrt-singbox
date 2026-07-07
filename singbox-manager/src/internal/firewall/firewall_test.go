@@ -146,6 +146,29 @@ func TestRenderUDPBypass(t *testing.T) {
 	}
 }
 
+// DNS capture must run *before* the UDP-bypass returns. A UDP-bypass device
+// (proxied TCP, direct UDP) still needs its DNS hijacked — DNS is UDP/53, so if
+// the udpbypass return fired first the query would leak direct and sing-box
+// could not route it. Regression test for that ordering.
+func TestRenderDNSCaptureBeforeUDPBypass(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = true
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "console", Enabled: true, IPv4: "192.168.1.50", Mode: "tproxy", BypassUDP: true},
+	}
+
+	got := mustRender(t, cfg)
+	dnsIdx := strings.Index(got, "th dport 53 goto singbox_manager_tproxy_do")
+	udpIdx := strings.Index(got, "meta l4proto udp ip saddr @singbox_manager_udpbypass4 return")
+	if dnsIdx < 0 || udpIdx < 0 {
+		t.Fatalf("missing expected DNS-capture/udpbypass rules:\n%s", got)
+	}
+	if dnsIdx > udpIdx {
+		t.Fatalf("DNS capture must precede the UDP-bypass returns:\n%s", got)
+	}
+}
+
 // A bypass_udp flag on a non-tproxy device is ignored: a bypassed device is
 // already fully direct, so it never enters the udpbypass set.
 func TestRenderUDPBypassIgnoredWhenNotTProxy(t *testing.T) {
