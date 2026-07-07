@@ -31,6 +31,12 @@ jobs:
 
       - name: Install OpenWrt SDK build prerequisites
         run: |
+          # The GitHub runner image ships extra third-party apt repos (Microsoft,
+          # Google) we don't use. When one of them serves a broken signature,
+          # `apt-get update` exits non-zero and kills this step under `bash -e`.
+          # Drop those repo lists first so only the Ubuntu mirrors are refreshed.
+          sudo rm -f /etc/apt/sources.list.d/microsoft* /etc/apt/sources.list.d/*azure* \
+            /etc/apt/sources.list.d/google* /etc/apt/sources.list.d/*chrome* || true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk bc \
