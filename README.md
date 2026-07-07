@@ -86,7 +86,8 @@ apk add singbox-manager luci-app-singbox-manager
 ```
 
 > Prebuilt feeds currently cover x86/64 (`x86_64`), armsr/armv8 (`aarch64_generic`),
-> armsr/armv7 (`arm_cortex-a15_neon-vfpv4`), and ramips/mt7621 (`mipsel_24kc`). If
+> mediatek/filogic (`aarch64_cortex-a53`), armsr/armv7 (`arm_cortex-a15_neon-vfpv4`),
+> and ramips/mt7621 (`mipsel_24kc`). The feed path is your `cat /etc/apk/arch`. If
 > `apk update` 404s, your target isn't published yet — build it yourself with
 > `make ipk-<arch>` (see below).
 
@@ -150,7 +151,8 @@ the SDK automatically.
 
 ```sh
 make ipk-x86_64      # build for one arch into dist/x86_64/
-make ipk-aarch64     # armsr/armv8
+make ipk-aarch64     # armsr/armv8 (aarch64_generic)
+make ipk-aarch64_cortexa53  # mediatek/filogic (aarch64_cortex-a53)
 make ipk-armv7       # armsr/armv7
 make ipk-mipsel      # ramips/mt7621
 make ipk-all         # build every arch in ARCHS into dist/<arch>/

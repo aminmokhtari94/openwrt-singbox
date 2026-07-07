@@ -25,7 +25,7 @@ jobs:
         release:
           - { version: "24.10.7", series: "24.10" }
           - { version: "25.12.4", series: "25.12" }
-        arch: [x86_64, aarch64, armv7, mipsel]
+        arch: [x86_64, aarch64, aarch64_cortexa53, armv7, mipsel]
     steps:
       - uses: actions/checkout@v4
 

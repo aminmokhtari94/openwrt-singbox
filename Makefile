@@ -42,11 +42,16 @@ OPENWRT_BASE_URL ?= https://downloads.openwrt.org/releases/$(OPENWRT_VERSION)/ta
 # only per-arch difference is the target path. Add a new label by defining
 # TARGET_PATH_<name> and appending it to ARCHS (or pass ARCHS= on the CLI).
 # ---------------------------------------------------------------------------
-ARCHS ?= x86_64 aarch64 armv7 mipsel
-TARGET_PATH_x86_64  := x86/64
-TARGET_PATH_aarch64 := armsr/armv8
-TARGET_PATH_armv7   := armsr/armv7
-TARGET_PATH_mipsel  := ramips/mt7621
+# aarch64 splits into two OpenWrt package archs: armsr/armv8 emits the generic
+# `aarch64_generic` (ARM SBCs, VMs), while cortex-a53 routers (mediatek/filogic,
+# ipq807x, mt7622, …) run `aarch64_cortex-a53` and reject a `aarch64_generic`
+# binary as uninstallable. Ship both; the feed dir is named by the real apk arch.
+ARCHS ?= x86_64 aarch64 aarch64_cortexa53 armv7 mipsel
+TARGET_PATH_x86_64          := x86/64
+TARGET_PATH_aarch64         := armsr/armv8
+TARGET_PATH_aarch64_cortexa53 := mediatek/filogic
+TARGET_PATH_armv7           := armsr/armv7
+TARGET_PATH_mipsel          := ramips/mt7621
 
 # SDK archive names embed the libc variant. Most targets use plain "musl";
 # 32-bit ARM EABI (armv7) ships as "musl_eabi". Override LIBC_<arch> for any
