@@ -1,8 +1,12 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=singbox-manager
-PKG_VERSION:=0.1.0
-PKG_RELEASE:=7
+# Stamped from the release tag via SINGBOX_PKG_VERSION (exported by the top-level
+# Makefile / release workflow). Without a bumped version the published package
+# matches what is installed and OpenWrt never offers an upgrade. Falls back to a
+# base version for standalone/dev builds.
+PKG_VERSION:=$(if $(SINGBOX_PKG_VERSION),$(SINGBOX_PKG_VERSION),0.1.0)
+PKG_RELEASE:=1
 
 PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 PKG_BUILD_DEPENDS:=golang/host

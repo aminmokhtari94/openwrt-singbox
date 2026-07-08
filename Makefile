@@ -1,6 +1,18 @@
 SHELL := /usr/bin/env bash
 
 # ---------------------------------------------------------------------------
+# Package version
+#
+# Stamped into the singbox-manager/luci .ipk/.apk so each release supersedes the
+# installed package (otherwise PKG_VERSION stays 0.1.0 and OpenWrt offers no
+# upgrade). Derived from the latest git tag (release checkouts are on a `vX.Y.Z`
+# tag), with the leading `v` stripped. Exported so the SDK sub-make and the
+# package Makefiles pick it up; override on the CLI for one-off builds.
+# ---------------------------------------------------------------------------
+SINGBOX_PKG_VERSION ?= $(patsubst v%,%,$(shell git describe --tags --abbrev=0 2>/dev/null || echo 0.0.0))
+export SINGBOX_PKG_VERSION
+
+# ---------------------------------------------------------------------------
 # Go daemon (host build / tests)
 # ---------------------------------------------------------------------------
 GO_SRC := singbox-manager/src
