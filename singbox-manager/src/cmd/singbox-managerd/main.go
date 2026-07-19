@@ -352,16 +352,25 @@ func cleanupRuntime(configPath string) error {
 }
 
 func startRuntimeSupervisor(configPath string) {
-	if managedRuntimePID(runtime.DefaultPaths) == 0 {
-		return
-	}
 	cfg, err := managerconfig.Load(configPath)
 	if err != nil {
 		log.Printf("runtime supervision skipped: %v", err)
 		return
 	}
+	if managedRuntimePID(runtime.DefaultPaths) > 0 {
+		runtime.Supervise(*cfg, runtime.DefaultPaths, render.Render)
+		log.Printf("runtime supervision attached to existing sing-box process")
+		return
+	}
+	if !cfg.Manager.Enabled {
+		return
+	}
+	// Cold start: after a reboot the pid file lives on tmpfs and nothing is
+	// running, so the manager has to bring sing-box up itself. The supervisor
+	// retries on a timer, which also covers the boot window where the network
+	// or fw4 is not ready yet.
 	runtime.Supervise(*cfg, runtime.DefaultPaths, render.Render)
-	log.Printf("runtime supervision attached to existing sing-box process")
+	log.Printf("manager enabled with no running sing-box; starting runtime")
 }
 
 func startSubscriptionScheduler(configPath string) {
