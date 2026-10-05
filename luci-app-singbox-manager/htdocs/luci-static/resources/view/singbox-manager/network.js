@@ -30,12 +30,6 @@ var callSetTUN = rpc.declare({
 	expect: { '': {} }
 });
 
-function valueOrDash(value) {
-	if (value === null || value === undefined || value === '')
-		return '-';
-	return value;
-}
-
 function field(root, name) {
 	return root.querySelector('[name="%s"]'.format(name));
 }
@@ -70,7 +64,7 @@ function refreshView(view) {
 function showResult(result, fallback) {
 	if (result && result.ok)
 		return true;
-	ui.addNotification(null, E('p', (result && result.errors || [ fallback ]).join('; ')));
+	theme.error(result, fallback);
 	return false;
 }
 
@@ -92,6 +86,16 @@ function rowFieldValue(rowEl, cls) {
 	return el ? el.value.trim() : '';
 }
 
+// isDraft reports a row added in this session that has no MAC or address yet.
+// Rows loaded from the config carry a data-id and are always submitted, so
+// clearing an existing device's identifiers is reported instead of dropped.
+function isDraft(rowEl) {
+	return !rowEl.getAttribute('data-id') &&
+		!rowFieldValue(rowEl, 'dev-mac') &&
+		!rowFieldValue(rowEl, 'dev-ipv4') &&
+		!rowFieldValue(rowEl, 'dev-ipv6');
+}
+
 function readDevices(root) {
 	var devices = [];
 	var rows = root.querySelectorAll('.singbox-manager-device-row');
@@ -101,8 +105,9 @@ function readDevices(root) {
 		var mac = rowFieldValue(rowEl, 'dev-mac');
 		var ipv4 = rowFieldValue(rowEl, 'dev-ipv4');
 		var ipv6 = rowFieldValue(rowEl, 'dev-ipv6');
-		// Skip fully-empty placeholder rows so they are not persisted.
-		if (!name && !mac && !ipv4 && !ipv6)
+		// A new row is a draft until it has something to match on; it is not
+		// persisted yet (saving it would only fail validation).
+		if (isDraft(rowEl))
 			continue;
 		var enabledEl = rowEl.querySelector('.dev-enabled');
 		var udpEl = rowEl.querySelector('.dev-udp');
@@ -131,11 +136,17 @@ function readTUNForm(root) {
 	};
 }
 
-function applyTransparent(view) {
+// applyTransparent saves the whole section. On success the page re-renders
+// from the daemon's state. On failure a toggle/select is reverted by the same
+// re-render, but a device-row edit keeps the typed values (keepOnError) so a
+// typo in a MAC or address can be corrected instead of being wiped.
+function applyTransparent(view, keepOnError) {
 	var root = document.querySelector('.singbox-manager-page');
 	return callSetTransparent(readTransparentForm(root)).then(function(result) {
 		if (showResult(result, _('Save failed')))
-			ui.addNotification(null, E('p', _('Transparent proxy settings applied')));
+			theme.notify(_('Transparent proxy settings applied'));
+		else if (keepOnError)
+			return;
 		return refreshView(view);
 	});
 }
@@ -144,7 +155,7 @@ function applyTUN(view) {
 	var root = document.querySelector('.singbox-manager-page');
 	return callSetTUN(readTUNForm(root)).then(function(result) {
 		if (showResult(result, _('Save failed')))
-			ui.addNotification(null, E('p', _('TUN settings applied')));
+			theme.notify(_('TUN settings applied'));
 		return refreshView(view);
 	});
 }
@@ -217,7 +228,12 @@ var DEVICE_MODE_OPTIONS = [
 
 function deviceRow(view, device) {
 	device = device || {};
-	var apply = function() { return applyTransparent(view); };
+	var apply = function(ev) {
+		var rowEl = ev.target.closest('.singbox-manager-device-row');
+		if (rowEl && isDraft(rowEl))
+			return;
+		return applyTransparent(view, true);
+	};
 	var modeSelect = E('select', { 'class': 'cbi-input-select dev-mode', 'change': ui.createHandlerFn(view, apply) },
 		DEVICE_MODE_OPTIONS.map(function(opt) {
 			return E('option', {
@@ -229,9 +245,12 @@ function deviceRow(view, device) {
 		'class': 'cbi-button cbi-button-remove',
 		'click': ui.createHandlerFn(view, function(ev) {
 			var rowEl = ev.target.closest('.singbox-manager-device-row');
-			if (rowEl)
-				rowEl.parentNode.removeChild(rowEl);
-			return applyTransparent(view);
+			if (!rowEl)
+				return;
+			var draft = isDraft(rowEl);
+			rowEl.parentNode.removeChild(rowEl);
+			if (!draft)
+				return applyTransparent(view);
 		})
 	}, _('Remove'));
 	return E('div', { 'class': 'singbox-manager-device-row', 'data-id': device.id || '' }, [
@@ -314,11 +333,14 @@ function lanDevicePicker(view, lanDevices) {
 					if (!container)
 						return;
 					var dev = deviceFromLan(d);
-					if (deviceAlreadyListed(container, dev))
+					if (deviceAlreadyListed(container, dev)) {
+						theme.notify(_('%s already has an override').format(deviceLabel(d)));
 						return;
+					}
 					container.appendChild(deviceRow(view, dev));
+					return applyTransparent(view, true);
 				}
-			}, deviceLabel(d));
+			}, [ deviceLabel(d) ]);
 		}))
 	]);
 }
@@ -340,8 +362,11 @@ function renderDeviceEditor(view, devices, lanDevices) {
 		'class': 'cbi-button cbi-button-add',
 		'click': ui.createHandlerFn(view, function() {
 			var container = document.querySelector('.singbox-manager-devices');
-			if (container)
-				container.appendChild(deviceRow(view, { mode: 'default' }));
+			if (!container)
+				return;
+			var rowEl = deviceRow(view, { mode: 'default', enabled: true });
+			container.appendChild(rowEl);
+			rowEl.querySelector('.dev-name').focus();
 		})
 	}, _('Add device'));
 	return E('div', { 'class': 'singbox-manager-device-editor' }, [
@@ -371,9 +396,9 @@ function renderTransparent(view, data) {
 		]),
 		renderDeviceEditor(view, data.devices, data.lan_devices),
 		E('div', { 'class': 'singbox-manager-meta' }, [
-			E('span', {}, _('tproxy port: %s').format(valueOrDash(data.tproxy_port))),
-			E('span', {}, _('DNS port: %s').format(valueOrDash(data.dns_port))),
-			E('span', {}, _('nftables include: %s').format(data.nftables_present ? _('present') : _('absent')))
+			E('span', {}, [ _('tproxy port: %s').format(data.tproxy_port || '-') ]),
+			E('span', {}, [ _('DNS port: %s').format(data.dns_port || '-') ]),
+			E('span', {}, [ _('nftables include: %s').format(data.nftables_present ? _('present') : _('absent')) ])
 		])
 	]);
 }
@@ -388,7 +413,7 @@ function renderTUN(view, data) {
 		]),
 		E('p', { 'class': 'singbox-manager-hint' }, _('System-wide routing via a virtual interface. Cannot be enabled together with transparent proxy.')),
 		E('div', { 'class': 'singbox-manager-rows' }, [
-			row(_('Enable'), _('Create the %s interface and route through it.').format(valueOrDash(data.interface || 'singbox0')), toggle(view, 'tun_enabled', data.enabled, apply)),
+			row(_('Enable'), _('Create the %s interface and route through it.').format(data.interface || 'singbox0'), toggle(view, 'tun_enabled', data.enabled, apply)),
 			row(_('Auto route'), _('Install routes for traffic handled by TUN.'), toggle(view, 'tun_route', data.auto_route, apply)),
 			row(_('Auto redirect'), _('Redirect traffic into TUN automatically where supported.'), toggle(view, 'tun_redirect', data.auto_redirect, apply)),
 			row(_('IPv4 address'), '', textField(view, 'tun_inet4', data.inet4_address, '172.19.0.1/30', apply)),
@@ -403,11 +428,15 @@ function renderPreview(data) {
 		return '';
 	return E('div', { 'class': 'singbox-manager-section' }, [
 		E('h3', {}, _('nftables Preview')),
-		E('pre', { 'class': 'singbox-manager-preview' }, valueOrDash(data.nftables_preview))
+		E('pre', { 'class': 'singbox-manager-preview' }, theme.text(data.nftables_preview))
 	]);
 }
 
 return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
 	load: function() {
 		return Promise.all([ callTransparent(), callTUN() ]);
 	},

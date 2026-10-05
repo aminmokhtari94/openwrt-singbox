@@ -1,5 +1,6 @@
 'use strict';
 'require baseclass';
+'require ui';
 
 // Shared visual theme for every SingBox Manager view. The stylesheet is the
 // single source of truth for the card-based look modelled on the dashboard; it
@@ -65,6 +66,8 @@ var CSS = [
 	'.singbox-manager-table tbody tr:not(.singbox-manager-group-row) td[colspan]{text-align:center;color:var(--text-color-medium);padding:18px 10px}',
 	'.singbox-manager-table th:last-child,.singbox-manager-table td:last-child{text-align:right}',
 	'.singbox-manager-table .singbox-manager-actions{justify-content:flex-end}',
+	'.singbox-manager-table tbody tr.singbox-manager-current td{background:rgba(34,113,177,.10)}',
+	'.singbox-manager-table td.singbox-manager-wrap{white-space:normal;overflow-wrap:anywhere;max-width:280px}',
 	'.singbox-manager-group-row td{background:var(--background-color-low);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:var(--text-color-medium);text-align:left!important}',
 
 	/* ---- modal forms ---- */
@@ -102,7 +105,7 @@ var CSS = [
 	/* ---- alerts + preformatted blocks ---- */
 	'.singbox-manager-warning{padding:10px 12px;border-radius:8px;border-left:4px solid #b45309;background:rgba(180,83,9,.10);font-size:13px}',
 	'.singbox-manager-preview{box-sizing:border-box;max-width:100%;min-height:60px;overflow:auto;padding:12px;border:1px solid var(--border-color-medium);border-radius:8px;background:var(--background-color-low);font:12px/1.5 monospace;white-space:pre}',
-	'.singbox-manager-log{box-sizing:border-box;max-width:100%;min-height:360px;overflow:auto;padding:12px;border:1px solid var(--border-color-medium);border-radius:8px;background:var(--background-color-low);font:12px/1.5 monospace;white-space:pre-wrap;word-break:break-word}',
+	'.singbox-manager-log{box-sizing:border-box;max-width:100%;min-height:360px;max-height:60vh;overflow:auto;padding:12px;border:1px solid var(--border-color-medium);border-radius:8px;background:var(--background-color-low);font:12px/1.5 monospace;white-space:pre-wrap;word-break:break-word}',
 	'.singbox-manager-details{border:1px solid var(--border-color-medium);border-radius:8px;padding:0}',
 	'.singbox-manager-details>summary{cursor:pointer;padding:10px 12px;font-size:13px;font-weight:600;color:var(--text-color-medium);list-style:none}',
 	'.singbox-manager-details[open]>summary{border-bottom:1px solid var(--border-color-medium)}',
@@ -137,7 +140,7 @@ var CSS = [
 	'.singbox-manager-chart-foot{font-size:11px;color:var(--text-color-medium)}',
 
 	/* ---- dashboard metrics ---- */
-	'.singbox-manager-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}',
+	'.singbox-manager-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}',
 	'.singbox-manager-metric{border:1px solid var(--border-color-medium);border-radius:12px;padding:14px;background:var(--background-color-high)}',
 	'.singbox-manager-metric-label{font-size:12px;color:var(--text-color-medium);margin-bottom:6px}',
 	'.singbox-manager-metric-value{font-size:18px;font-weight:600;overflow-wrap:anywhere}',
@@ -156,7 +159,48 @@ var CSS = [
 	'}'
 ].join('');
 
+// ANSI SGR sequences (sing-box colours its log output). Matched both with the
+// ESC byte and without it, since the syslog pipeline may have stripped or
+// mangled the control character.
+var ANSI_RE = /(?:\x1b|␛)?\[[0-9;]*m/g;
+
 return baseclass.extend({
+	// text wraps a value as a one-element child list. LuCI's E()/dom.append
+	// assigns a lone string child via innerHTML; wrapping it in an array makes
+	// it a text node instead, so names from subscriptions, DHCP hostnames, log
+	// lines and backend errors can never inject markup into the admin session.
+	text: function(value) {
+		if (value === null || value === undefined || value === '')
+			return [ '-' ];
+		return [ String(value) ];
+	},
+
+	stripAnsi: function(value) {
+		return String(value || '').replace(ANSI_RE, '');
+	},
+
+	// notify shows a success message that fades on its own (falling back to a
+	// sticky one on LuCI builds without time-limited notifications).
+	notify: function(message) {
+		var body = E('p', {}, [ String(message) ]);
+		if (typeof ui.addTimeLimitedNotification === 'function')
+			ui.addTimeLimitedNotification(null, body, 5000, 'info');
+		else
+			ui.addNotification(null, body, 'info');
+	},
+
+	// error shows a sticky, red notification built from a backend result
+	// ({ errors: [...] }) or a plain message.
+	error: function(resultOrMessage, fallback) {
+		var message = resultOrMessage;
+		if (resultOrMessage && typeof resultOrMessage === 'object')
+			message = (resultOrMessage.errors && resultOrMessage.errors.length)
+				? resultOrMessage.errors.join('; ')
+				: (resultOrMessage.message || fallback);
+		ui.addNotification(null, E('p', {}, [ String(message || fallback || _('Request failed')) ]), 'danger');
+	},
+
+
 	// inject adds the shared stylesheet to <head> once. Re-renders are common
 	// (polling, refreshView replacing the page subtree); the id guard keeps a
 	// single <style> element regardless of how often render() runs.

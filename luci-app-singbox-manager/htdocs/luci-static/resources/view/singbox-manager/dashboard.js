@@ -70,6 +70,8 @@ var callLogs = rpc.declare({
 
 var MODE_OPTIONS = [ 'direct', 'rule', 'global' ];
 var POLL_INTERVAL = 5;
+var LOG_LINES = 300;
+var HISTORY = 48;
 
 function valueOrDash(value) {
 	if (value === null || value === undefined || value === '')
@@ -100,9 +102,11 @@ function healthClass(value) {
 	return '';
 }
 
-function showResult(result, successText, failureText) {
-	var message = result && result.ok ? (result.message || successText) : ((result && result.errors || [ failureText ]).join('; '));
-	ui.addNotification(null, E('p', message));
+function reportResult(result, successText, failureText) {
+	if (result && result.ok)
+		theme.notify(result.message || successText);
+	else
+		theme.error(result, failureText);
 }
 
 function startRuntime(data) {
@@ -114,28 +118,44 @@ function startRuntime(data) {
 	});
 }
 
+// runAction calls an RPC, reports its outcome and re-renders the live panel
+// right away instead of leaving stale state up until the next poll tick.
+function runAction(view, call, successText, failureText) {
+	return call().then(function(result) {
+		reportResult(result, successText, failureText);
+	}).then(function() {
+		return refreshLive(view, true);
+	});
+}
+
 function pushHistory(view, data) {
 	view.hist = view.hist || [];
 	view.hist.push({
+		t: Date.now(),
 		rx: Number(data.rx_bytes || 0),
-		tx: Number(data.tx_bytes || 0),
-		conn: Number(data.connections || 0)
+		tx: Number(data.tx_bytes || 0)
 	});
-	if (view.hist.length > 48)
+	if (view.hist.length > HISTORY)
 		view.hist.shift();
 	return view.hist;
 }
 
-function deltaSeries(hist, key) {
+// rateSeries turns cumulative byte counters into bytes/second using the real
+// time between samples (polls drift, and action-triggered refreshes add extra
+// samples). A counter that went backwards means sing-box restarted: count 0.
+function rateSeries(hist, key) {
 	var out = [];
-	for (var i = 1; i < hist.length; i++)
-		out.push(Math.max(0, hist[i][key] - hist[i - 1][key]));
+	for (var i = 1; i < hist.length; i++) {
+		var dt = (hist[i].t - hist[i - 1].t) / 1000;
+		var delta = hist[i][key] - hist[i - 1][key];
+		out.push(dt > 0 && delta > 0 ? delta / dt : 0);
+	}
 	return out;
 }
 
 // sparkline builds an SVG line+area chart via innerHTML so it renders in the
 // SVG namespace (LuCI's E() only creates HTML elements). Inputs are numeric
-// byte deltas, so string interpolation here is safe.
+// rates, so string interpolation here is safe.
 function sparkline(values, color) {
 	var box = E('div', { 'class': 'singbox-manager-spark' });
 	if (!values || values.length < 2) {
@@ -164,86 +184,81 @@ function lastValue(series) {
 function metric(label, value, accent) {
 	return E('div', { 'class': 'singbox-manager-metric' }, [
 		E('div', { 'class': 'singbox-manager-metric-label' }, label),
-		E('div', { 'class': 'singbox-manager-metric-value' + (accent ? ' ' + accent : '') }, valueOrDash(value))
+		E('div', { 'class': 'singbox-manager-metric-value' + (accent ? ' ' + accent : '') }, theme.text(value))
 	]);
 }
 
 function renderHero(view, data) {
 	var running = !!data.running;
+	var paused = !running && !!data.manager_paused;
 	var primary = running
 		? E('button', {
 			'class': 'btn cbi-button cbi-button-remove',
+			'title': _('Stop the proxy and hold it down (survives reboot) until started again'),
 			'click': ui.createHandlerFn(view, function() {
-				return callStop().then(function(result) {
-					showResult(result, _('sing-box stopped'), _('Stop failed'));
-				}).then(L.bind(view.load, view));
+				return runAction(view, callStop, _('sing-box stopped'), _('Stop failed'));
 			})
 		}, _('Stop'))
 		: E('button', {
 			'class': 'btn cbi-button cbi-button-apply',
+			'disabled': data.daemon ? null : 'disabled',
 			'click': ui.createHandlerFn(view, function() {
-				return startRuntime(data).then(function(result) {
-					showResult(result, _('sing-box started'), _('Start failed'));
-				}).then(L.bind(view.load, view));
+				return runAction(view, function() { return startRuntime(data); }, _('sing-box started'), _('Start failed'));
 			})
 		}, _('Start'));
 
-	var paused = !running && !!data.manager_paused;
 	var subtitle = running
 		? _('PID %s').format(valueOrDash(data.sing_box_pid))
-		: (paused ? _('Management mode — proxy held down, LAN untouched')
-			: (data.manager_enabled ? _('Manager enabled') : _('Manager disabled')));
+		: (!data.daemon ? _('Manager daemon is not running')
+			: (paused ? _('Management mode — proxy held down, LAN untouched')
+				: (data.manager_enabled ? _('Manager enabled') : _('Manager disabled'))));
 
 	var modeSelect = E('select', {
-		'class': 'cbi-input-select',
+		'class': 'cbi-input-select singbox-manager-mode',
 		'change': ui.createHandlerFn(view, function(ev) {
 			var mode = ev.target.value;
-			return callSetMode(mode).then(function(result) {
-				showResult(result, _('Mode set to %s').format(mode), _('Set mode failed'));
-			}).then(L.bind(view.load, view));
+			return runAction(view, function() { return callSetMode(mode); },
+				_('Mode set to %s').format(mode), _('Set mode failed'));
 		})
 	}, MODE_OPTIONS.map(function(opt) {
 		return E('option', { 'value': opt, 'selected': opt === data.runtime_mode ? 'selected' : null }, opt);
 	}));
+
+	var health = valueOrDash(data.health) + (data.latency_ms ? ' · ' + data.latency_ms + ' ms' : '');
 
 	return E('div', { 'class': 'singbox-manager-hero' }, [
 		E('div', { 'class': 'singbox-manager-hero-status' }, [
 			E('span', { 'class': 'singbox-manager-dot' + (running ? ' on' : (data.daemon ? ' idle' : ' off')) }),
 			E('div', {}, [
 				E('div', { 'class': 'singbox-manager-hero-state' }, running ? _('Running') : (paused ? _('Paused') : _('Stopped'))),
-				E('div', { 'class': 'singbox-manager-hero-sub' }, subtitle)
+				E('div', { 'class': 'singbox-manager-hero-sub' }, [ subtitle ])
 			])
 		]),
 		E('div', { 'class': 'singbox-manager-hero-facts' }, [
-			E('div', {}, [ E('span', {}, _('Group')), E('strong', {}, valueOrDash(data.active_group)) ]),
+			E('div', {}, [ E('span', {}, _('Group')), E('strong', {}, theme.text(data.active_group)) ]),
 			E('div', {}, [ E('span', {}, _('Mode')), modeSelect ]),
-			E('div', {}, [ E('span', {}, _('Outbound')), E('strong', {}, valueOrDash(data.selected_outbound)) ]),
-			E('div', {}, [ E('span', {}, _('Health')), E('strong', { 'class': healthClass(data.health) }, valueOrDash(data.health) + (data.latency_ms ? ' · ' + data.latency_ms + ' ms' : '')) ])
+			E('div', {}, [ E('span', {}, _('Outbound')), E('strong', {}, theme.text(data.selected_outbound)) ]),
+			E('div', {}, [ E('span', {}, _('Health')), E('strong', { 'class': healthClass(data.health) }, [ health ]) ])
 		]),
 		E('div', { 'class': 'singbox-manager-hero-action' }, primary)
 	]);
 }
 
-function renderThroughput(view, data, hist) {
-	var rxSeries = deltaSeries(hist, 'rx');
-	var txSeries = deltaSeries(hist, 'tx');
-	return E('div', { 'class': 'singbox-manager-charts' }, [
-		E('div', { 'class': 'singbox-manager-chart' }, [
-			E('div', { 'class': 'singbox-manager-chart-head' }, [
-				E('span', { 'class': 'singbox-manager-chart-title' }, _('Download')),
-				E('span', { 'class': 'singbox-manager-chart-rate' }, formatRate(lastValue(rxSeries) / POLL_INTERVAL))
-			]),
-			sparkline(rxSeries, '#2271b1'),
-			E('div', { 'class': 'singbox-manager-chart-foot' }, _('Total %s').format(formatBytes(data.rx_bytes)))
+function renderChart(title, series, color, total) {
+	return E('div', { 'class': 'singbox-manager-chart' }, [
+		E('div', { 'class': 'singbox-manager-chart-head' }, [
+			E('span', { 'class': 'singbox-manager-chart-title' }, title),
+			E('span', { 'class': 'singbox-manager-chart-rate' }, [ formatRate(lastValue(series)) ])
 		]),
-		E('div', { 'class': 'singbox-manager-chart' }, [
-			E('div', { 'class': 'singbox-manager-chart-head' }, [
-				E('span', { 'class': 'singbox-manager-chart-title' }, _('Upload')),
-				E('span', { 'class': 'singbox-manager-chart-rate' }, formatRate(lastValue(txSeries) / POLL_INTERVAL))
-			]),
-			sparkline(txSeries, '#0f7a39'),
-			E('div', { 'class': 'singbox-manager-chart-foot' }, _('Total %s').format(formatBytes(data.tx_bytes)))
-		])
+		sparkline(series, color),
+		E('div', { 'class': 'singbox-manager-chart-foot' }, [ _('Total %s').format(formatBytes(total)) ])
+	]);
+}
+
+function renderThroughput(data, hist) {
+	return E('div', { 'class': 'singbox-manager-charts' }, [
+		renderChart(_('Download'), rateSeries(hist, 'rx'), '#2271b1', data.rx_bytes),
+		renderChart(_('Upload'), rateSeries(hist, 'tx'), '#0f7a39', data.tx_bytes)
 	]);
 }
 
@@ -253,33 +268,29 @@ function renderToolbar(view, data) {
 			'class': 'btn cbi-button',
 			'disabled': data.running ? null : 'disabled',
 			'click': ui.createHandlerFn(view, function() {
-				return callRestart().then(function(result) {
-					showResult(result, _('sing-box restarted'), _('Restart failed'));
-				}).then(L.bind(view.load, view));
+				return runAction(view, callRestart, _('sing-box restarted'), _('Restart failed'));
 			})
 		}, _('Restart')),
 		E('button', {
 			'class': 'btn cbi-button',
+			'disabled': data.running ? null : 'disabled',
+			'title': _('Re-render the config and hot-reload sing-box'),
 			'click': ui.createHandlerFn(view, function() {
-				return callReload().then(function(result) {
-					showResult(result, _('sing-box reloaded'), _('Reload failed'));
-				}).then(L.bind(view.load, view));
+				return runAction(view, callReload, _('sing-box reloaded'), _('Reload failed'));
 			})
 		}, _('Reload')),
 		E('button', {
 			'class': 'btn cbi-button',
 			'click': ui.createHandlerFn(view, function() {
 				return callValidate().then(function(result) {
-					ui.addNotification(null, E('p', result.ok ? _('Configuration is valid') : (result.errors || [ _('Configuration has errors') ]).join('; ')));
+					reportResult(result, _('Configuration is valid'), _('Configuration has errors'));
 				});
 			})
 		}, _('Validate')),
 		E('button', {
 			'class': 'btn cbi-button',
 			'click': ui.createHandlerFn(view, function() {
-				return callHealthCheck().then(function(result) {
-					ui.addNotification(null, E('p', result.ok ? _('Health check complete') : (result.errors || [ _('Health check failed') ]).join('; ')));
-				}).then(L.bind(view.load, view));
+				return runAction(view, callHealthCheck, _('Health check complete'), _('Health check failed'));
 			})
 		}, _('Check Health'))
 	]);
@@ -290,15 +301,31 @@ function renderLive(view, data) {
 	var hist = pushHistory(view, data);
 	return E('div', { 'class': 'singbox-manager-live' }, [
 		renderHero(view, data),
-		renderThroughput(view, data, hist),
+		renderThroughput(data, hist),
 		E('div', { 'class': 'singbox-manager-metrics' }, [
-			metric(_('Daemon'), data.daemon ? _('Online') : _('Offline')),
-			metric(_('Connections'), data.connections || 0),
+			metric(_('Daemon'), data.daemon ? _('Online') : _('Offline'), data.daemon ? 'ok' : 'error'),
+			metric(_('Connections'), String(data.connections || 0)),
 			metric(_('Memory'), formatBytes((data.memory_kb || 0) * 1024)),
+			metric(_('CPU'), data.cpu_percent ? data.cpu_percent + ' %' : '-'),
 			metric(_('Strategy'), data.strategy)
 		]),
 		renderToolbar(view, data)
 	]);
+}
+
+// refreshLive fetches status and swaps the live panel. A poll tick is skipped
+// while the user is interacting with a control inside the panel (e.g. the mode
+// dropdown is open), otherwise the rebuild would close it mid-selection.
+function refreshLive(view, force) {
+	return callStatus().then(function(status) {
+		var current = view.root && view.root.querySelector('.singbox-manager-live');
+		if (!current)
+			return;
+		var active = document.activeElement;
+		if (!force && active && active.tagName === 'SELECT' && current.contains(active))
+			return;
+		current.parentNode.replaceChild(renderLive(view, status || {}), current);
+	});
 }
 
 function downloadText(text) {
@@ -311,38 +338,60 @@ function downloadText(text) {
 	window.setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
 }
 
+// updateLogs replaces the log text in place. When the reader is parked at the
+// bottom it follows new lines; when they have scrolled up to read something,
+// their position is kept instead of jumping on every poll.
+function updateLogs(view, data) {
+	var pre = view.logEl;
+	if (!pre)
+		return;
+	var text = theme.stripAnsi((data && data.text) || '');
+	view.logText = text;
+	var atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+	var top = pre.scrollTop;
+	pre.textContent = text || _('No log output yet');
+	pre.scrollTop = atBottom ? pre.scrollHeight : top;
+}
+
+function refreshLogs(view) {
+	return callLogs(LOG_LINES).then(function(result) {
+		updateLogs(view, result || {});
+	});
+}
+
 function renderLogs(view, data) {
-	data = data || {};
-	var text = data.text || '';
-	return E('div', { 'class': 'singbox-manager-logs' }, [
+	view.logEl = E('pre', { 'class': 'singbox-manager-log' });
+	var box = E('div', { 'class': 'singbox-manager-logs' }, [
 		E('div', { 'class': 'singbox-manager-section-header' }, [
 			E('h3', {}, _('Logs')),
 			E('div', { 'class': 'singbox-manager-toolbar' }, [
 				E('button', {
 					'class': 'btn cbi-button',
-					'click': ui.createHandlerFn(view, function() {
-						return callLogs(300).then(function(result) {
-							view.logsData = result || {};
-							var replacement = renderLogs(view, view.logsData);
-							var current = document.querySelector('.singbox-manager-logs');
-							if (current)
-								current.parentNode.replaceChild(replacement, current);
-						});
-					})
+					'click': ui.createHandlerFn(view, function() { return refreshLogs(view); })
 				}, _('Refresh')),
 				E('button', {
 					'class': 'btn cbi-button',
-					'click': function() { downloadText(text); }
+					'click': function() { downloadText(view.logText); }
 				}, _('Download'))
 			])
 		]),
-		E('pre', { 'class': 'singbox-manager-log' }, valueOrDash(text))
+		view.logEl
 	]);
+	updateLogs(view, data);
+	// Start at the newest line once the element is laid out.
+	window.requestAnimationFrame(function() {
+		view.logEl.scrollTop = view.logEl.scrollHeight;
+	});
+	return box;
 }
 
 return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
 	load: function() {
-		return Promise.all([ callStatus(), callLogs(300) ]).then(function(results) {
+		return Promise.all([ callStatus(), callLogs(LOG_LINES) ]).then(function(results) {
 			return { status: results[0], logs: results[1] };
 		});
 	},
@@ -350,36 +399,16 @@ return view.extend({
 	render: function(data) {
 		var view = this;
 		data = data || {};
-		view.logsData = data.logs || {};
 		theme.inject();
 
-		var live = renderLive(view, data.status || {});
-		var logs = renderLogs(view, view.logsData);
-
-		var root = E('div', { 'class': 'singbox-manager-dashboard' }, [
-			live,
-			logs
+		view.root = E('div', { 'class': 'singbox-manager-dashboard' }, [
+			renderLive(view, data.status || {}),
+			renderLogs(view, data.logs || {})
 		]);
 
-		poll.add(L.bind(function() {
-			return callStatus().then(L.bind(function(status) {
-				var replacement = renderLive(this, status || {});
-				var current = root.querySelector('.singbox-manager-live');
-				if (current)
-					current.parentNode.replaceChild(replacement, current);
-			}, this));
-		}, this), POLL_INTERVAL);
+		poll.add(function() { return refreshLive(view, false); }, POLL_INTERVAL);
+		poll.add(function() { return refreshLogs(view); }, POLL_INTERVAL);
 
-		poll.add(L.bind(function() {
-			return callLogs(300).then(L.bind(function(result) {
-				this.logsData = result || {};
-				var replacement = renderLogs(this, this.logsData);
-				var current = root.querySelector('.singbox-manager-logs');
-				if (current)
-					current.parentNode.replaceChild(replacement, current);
-			}, this));
-		}, this), POLL_INTERVAL);
-
-		return root;
+		return view.root;
 	}
 });

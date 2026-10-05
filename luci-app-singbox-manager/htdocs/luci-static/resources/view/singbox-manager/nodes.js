@@ -93,12 +93,6 @@ var callRefreshAll = rpc.declare({
 	expect: { '': {} }
 });
 
-function valueOrDash(value) {
-	if (value === null || value === undefined || value === '')
-		return '-';
-	return value;
-}
-
 function statusClass(value) {
 	if (value === 'ok')
 		return 'singbox-manager-status-ok';
@@ -141,7 +135,7 @@ function showResult(result, fallback) {
 	if (result.ok)
 		return true;
 
-	ui.addNotification(null, E('p', (result.errors || [ fallback ]).join('; ')));
+	theme.error(result, fallback);
 	return false;
 }
 
@@ -163,7 +157,7 @@ function changeStrategy(view, group, value) {
 	return callSetGroup(payload).then(function(result) {
 		if (!showResult(result, _('Save failed')))
 			return refreshView(view);
-		ui.addNotification(null, E('p', _('Strategy saved')));
+		theme.notify(_('Strategy saved'));
 		return refreshView(view);
 	});
 }
@@ -179,7 +173,7 @@ function renderProxy(view, data) {
 		]),
 		E('div', { 'class': 'singbox-manager-grid' }, [
 			E('div', { 'class': 'singbox-manager-label' }, _('Active group')),
-			E('div', {}, valueOrDash(activeGroup)),
+			E('div', {}, theme.text(activeGroup)),
 			E('div', { 'class': 'singbox-manager-label' }, _('Strategy')),
 			E('div', {}, E('select', {
 				'class': 'cbi-input-select',
@@ -194,7 +188,7 @@ function renderProxy(view, data) {
 				E('option', { 'value': 'load-balance', 'selected': selected('load-balance', strategy) }, strategyLabel('load-balance'))
 			])),
 			E('div', { 'class': 'singbox-manager-label' }, _('Selected node')),
-			E('div', {}, valueOrDash(selectedNode))
+			E('div', {}, theme.text(selectedNode))
 		])
 	]);
 }
@@ -268,7 +262,7 @@ function showEditSubscriptionModal(view, row) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Subscription saved')));
+						theme.notify(_('Subscription saved'));
 						return refreshView(view);
 					});
 				})
@@ -293,7 +287,7 @@ function showDeleteSubscriptionModal(view, row) {
 						if (!showResult(result, _('Delete failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Subscription deleted')));
+						theme.notify(_('Subscription deleted'));
 						return refreshView(view);
 					});
 				})
@@ -346,21 +340,21 @@ function showImportModal(view) {
 				'click': ui.createHandlerFn(view, function() {
 					var request = readImport(document.querySelector('.singbox-manager-import-grid'));
 					if (!request.input) {
-						ui.addNotification(null, E('p', _('A subscription or config link is required')));
+						theme.error(_('A subscription or config link is required'));
 						return;
 					}
 					return callImport(request).then(function(result) {
 						if (result.ok) {
-							ui.addNotification(null, E('p', result.remote ? _('Subscription saved and refreshed') : _('Imported %d nodes').format(result.imported || 0)));
+							theme.notify(result.remote ? _('Subscription saved and refreshed') : _('Imported %d nodes').format(result.imported || 0));
 							ui.hideModal();
 							return refreshView(view);
 						}
 						else if (result.saved) {
-							ui.addNotification(null, E('p', _('Subscription saved; import failed: %s').format((result.errors || [ _('Import failed') ]).join('; '))));
+							theme.error(_('Subscription saved; import failed: %s').format((result.errors || [ _('Import failed') ]).join('; ')));
 							return refreshView(view);
 						}
 						else
-							ui.addNotification(null, E('p', (result.errors || [ _('Import failed') ]).join('; ')));
+							theme.error(result, _('Import failed'));
 					});
 				})
 			}, _('Import'))
@@ -383,14 +377,14 @@ function renderSubscriptionsTable(view, rows) {
 		])),
 		E('tbody', {}, rows.length ? rows.map(function(row) {
 			return E('tr', {}, [
-				E('td', {}, valueOrDash(row.name || row.id)),
-				E('td', {}, valueOrDash(row.url)),
-				E('td', {}, valueOrDash(row.format)),
-				E('td', { 'class': statusClass(row.health) }, valueOrDash(row.health)),
+				E('td', {}, theme.text(row.name || row.id)),
+				E('td', { 'class': 'singbox-manager-wrap' }, theme.text(row.url)),
+				E('td', {}, theme.text(row.format)),
+				E('td', { 'class': statusClass(row.health) }, theme.text(row.health)),
 				E('td', {}, row.latency_ms ? '%d ms'.format(row.latency_ms) : '-'),
-				E('td', {}, valueOrDash(row.last_update)),
-				E('td', { 'class': row.last_error ? 'singbox-manager-status-error' : '' }, valueOrDash(row.last_error)),
-				E('td', {}, valueOrDash(row.last_check)),
+				E('td', {}, theme.text(row.last_update)),
+				E('td', { 'class': 'singbox-manager-wrap' + (row.last_error ? ' singbox-manager-status-error' : '') }, theme.text(row.last_error)),
+				E('td', {}, theme.text(row.last_check)),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
 						'class': 'btn cbi-button',
@@ -404,11 +398,11 @@ function renderSubscriptionsTable(view, rows) {
 						'click': ui.createHandlerFn(view, function() {
 							return callRefresh(row.id).then(function(result) {
 								if (result.ok) {
-									ui.addNotification(null, E('p', _('Imported %d nodes').format(result.imported || 0)));
+									theme.notify(_('Imported %d nodes').format(result.imported || 0));
 									return refreshView(view);
 								}
 								else
-									ui.addNotification(null, E('p', (result.errors || [ _('Refresh failed') ]).join('; ')));
+									theme.error(result, _('Refresh failed'));
 							});
 						})
 					}, _('Refresh')),
@@ -440,9 +434,9 @@ function renderSubscriptions(view, subscriptions) {
 					'click': ui.createHandlerFn(view, function() {
 						return callRefreshAll().then(function(result) {
 							if (result.ok)
-								ui.addNotification(null, E('p', _('Refreshed %d subscriptions, imported %d nodes').format(result.refreshed || 0, result.imported || 0)));
+								theme.notify(_('Refreshed %d subscriptions, imported %d nodes').format(result.refreshed || 0, result.imported || 0));
 							else
-								ui.addNotification(null, E('p', _('Refresh-all finished with %d failures').format((result.failures || []).length)));
+								theme.error(_('Refresh-all finished with %d failures').format((result.failures || []).length));
 							return refreshView(view);
 						});
 					})
@@ -619,7 +613,7 @@ function renderFilters(view, nodes, subscriptions) {
 				view.activeNodeFilter = filter.id;
 				return refreshView(view);
 			})
-		}, filter.label);
+		}, [ filter.label ]);
 	}));
 }
 
@@ -672,14 +666,14 @@ function showNodeModal(view, row) {
 					var root = document.querySelector('.singbox-manager-modal-form');
 					var node = readNode(root, row);
 					if (!node.id) {
-						ui.addNotification(null, E('p', _('Node ID is required')));
+						theme.error(_('Node ID is required'));
 						return;
 					}
 					return callSetNode(node).then(function(result) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Node saved')));
+						theme.notify(_('Node saved'));
 						return refreshView(view);
 					});
 				})
@@ -703,7 +697,7 @@ function showDeleteNodeModal(view, node) {
 				'click': ui.createHandlerFn(view, function() {
 					return callDeleteNode(node.id).then(function(result) {
 						if (!result.ok)
-							ui.addNotification(null, E('p', (result.errors || [ _('Delete failed') ]).join('; ')));
+							theme.error(result, _('Delete failed'));
 						ui.hideModal();
 						return refreshView(view);
 					});
@@ -716,11 +710,11 @@ function showDeleteNodeModal(view, node) {
 function selectNode(view, node) {
 	return callSelectNode(node.id).then(function(result) {
 		if (!result.ok)
-			ui.addNotification(null, E('p', (result.errors || [ _('Select failed') ]).join('; ')));
+			theme.error(result, _('Select failed'));
 		else if (result.reload_error)
-			ui.addNotification(null, E('p', _('Node selected; reload failed: %s').format(result.reload_error)));
+			theme.error(_('Node selected; reload failed: %s').format(result.reload_error));
 		else
-			ui.addNotification(null, E('p', result.reloaded ? _('Node selected and applied') : _('Node selected')));
+			theme.notify(result.reloaded ? _('Node selected and applied') : _('Node selected'));
 		return refreshView(view);
 	});
 }
@@ -731,21 +725,20 @@ function renderNodesTable(view, nodes, subscriptions, selectedNode) {
 	var rows = [];
 	groups.forEach(function(group) {
 		rows.push(E('tr', { 'class': 'singbox-manager-group-row' }, [
-			E('td', { 'colspan': 10 }, group.label)
+			E('td', { 'colspan': 9 }, [ group.label ])
 		]));
 		group.nodes.forEach(function(node) {
 			var manual = !node.subscription;
 			var nodeSelected = node.id === selectedNode;
-			rows.push(E('tr', {}, [
-				E('td', {}, valueOrDash(node.name || node.id)),
-				E('td', {}, valueOrDash(node.type)),
-				E('td', {}, valueOrDash(node.server || node.address)),
-				E('td', {}, valueOrDash(sourceLabel(node.subscription, subscriptions))),
-				E('td', {}, valueOrDash(node.health)),
+			rows.push(E('tr', { 'class': nodeSelected ? 'singbox-manager-current' : '' }, [
+				E('td', {}, nodeSelected ? E('strong', {}, theme.text(node.name || node.id)) : theme.text(node.name || node.id)),
+				E('td', {}, theme.text(node.type)),
+				E('td', {}, theme.text(node.server || node.address)),
+				E('td', {}, theme.text(sourceLabel(node.subscription, subscriptions))),
+				E('td', { 'class': statusClass(node.health) }, theme.text(node.health)),
 				E('td', {}, node.latency_ms ? '%d ms'.format(node.latency_ms) : '-'),
-				E('td', {}, valueOrDash(node.last_check)),
+				E('td', {}, theme.text(node.last_check)),
 				E('td', {}, node.enabled ? _('Yes') : _('No')),
-				E('td', {}, nodeSelected ? _('Yes') : '-'),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
 						'class': 'btn cbi-button' + (nodeSelected ? ' cbi-button-apply' : ''),
@@ -756,26 +749,28 @@ function renderNodesTable(view, nodes, subscriptions, selectedNode) {
 					}, nodeSelected ? _('Selected') : _('Select')),
 					E('button', {
 						'class': 'btn cbi-button',
+						'title': _('TCP connect to the node server'),
 						'disabled': node.enabled ? null : 'disabled',
 						'click': ui.createHandlerFn(view, function() {
 							return callNodePingTest(node.id).then(function(result) {
 								if (result.ok)
-									ui.addNotification(null, E('p', _('Node ping passed in %d ms').format(result.latency_ms || 0)));
+									theme.notify(_('Node ping passed in %d ms').format(result.latency_ms || 0));
 								else
-									ui.addNotification(null, E('p', (result.errors || [ _('Node ping failed') ]).join('; ')));
+									theme.error(result, _('Node ping failed'));
 								return refreshView(view);
 							});
 						})
 					}, _('Ping')),
 					E('button', {
 						'class': 'btn cbi-button',
+						'title': _('Fetch a test URL through this node'),
 						'disabled': node.enabled ? null : 'disabled',
 						'click': ui.createHandlerFn(view, function() {
 							return callNodeLatencyTest(node.id, '').then(function(result) {
 								if (result.ok)
-									ui.addNotification(null, E('p', _('URL test passed in %d ms').format(result.latency_ms || 0)));
+									theme.notify(_('URL test passed in %d ms').format(result.latency_ms || 0));
 								else
-									ui.addNotification(null, E('p', (result.errors || [ _('URL test failed') ]).join('; ')));
+									theme.error(result, _('URL test failed'));
 								return refreshView(view);
 							});
 						})
@@ -806,10 +801,9 @@ function renderNodesTable(view, nodes, subscriptions, selectedNode) {
 			E('th', {}, _('Latency')),
 			E('th', {}, _('Last check')),
 			E('th', {}, _('Enabled')),
-			E('th', {}, _('Selected')),
 			E('th', {}, '')
 		])),
-		E('tbody', {}, rows.length ? rows : E('tr', {}, E('td', { 'colspan': 10 }, _('No nodes'))))
+		E('tbody', {}, rows.length ? rows : E('tr', {}, E('td', { 'colspan': 9 }, _('No nodes — import a subscription or add one manually'))))
 	]);
 }
 
@@ -817,28 +811,31 @@ function renderNodes(view, nodes, subscriptions, selectedNode) {
 	return E('div', { 'class': 'singbox-manager-section' }, [
 		E('div', { 'class': 'singbox-manager-section-header' }, [
 			E('h3', {}, _('Nodes')),
-			E('button', {
-				'class': 'btn cbi-button',
-				'click': ui.createHandlerFn(view, function() {
-					ui.addNotification(null, E('p', _('Testing all nodes through their proxies…')), 'info');
-					return callNodesURLTest('').then(function(result) {
-						if (!result.ok) {
-							ui.addNotification(null, E('p', (result.errors || [ _('Test all failed') ]).join('; ')));
+			E('div', { 'class': 'singbox-manager-actions' }, [
+				E('button', {
+					'class': 'btn cbi-button',
+					'disabled': nodes.length ? null : 'disabled',
+					'click': ui.createHandlerFn(view, function() {
+						theme.notify(_('Testing all nodes through their proxies…'));
+						return callNodesURLTest('').then(function(result) {
+							if (!result.ok) {
+								theme.error(result, _('Test all failed'));
+								return refreshView(view);
+							}
+							var tested = result.nodes || [];
+							var ok = tested.filter(function(n) { return n.health === 'ok'; }).length;
+							theme.notify(_('Tested %d nodes: %d reachable').format(tested.length, ok));
 							return refreshView(view);
-						}
-						var nodes = result.nodes || [];
-						var ok = nodes.filter(function(n) { return n.health === 'ok'; }).length;
-						ui.addNotification(null, E('p', _('Tested %d nodes: %d reachable').format(nodes.length, ok)), 'info');
-						return refreshView(view);
-					});
-				})
-			}, _('Test all')),
-			E('button', {
-				'class': 'btn cbi-button cbi-button-add',
-				'click': ui.createHandlerFn(view, function() {
-					showNodeModal(view);
-				})
-			}, _('Add'))
+						});
+					})
+				}, _('Test all')),
+				E('button', {
+					'class': 'btn cbi-button cbi-button-add',
+					'click': ui.createHandlerFn(view, function() {
+						showNodeModal(view);
+					})
+				}, _('Add'))
+			])
 		]),
 		renderFilters(view, nodes, subscriptions),
 		renderNodesTable(view, nodes, subscriptions, selectedNode)
@@ -846,6 +843,10 @@ function renderNodes(view, nodes, subscriptions, selectedNode) {
 }
 
 return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
 	load: function() {
 		return callNodes();
 	},

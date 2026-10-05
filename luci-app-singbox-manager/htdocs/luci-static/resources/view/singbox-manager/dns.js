@@ -52,12 +52,6 @@ var callSetGroup = rpc.declare({
 	expect: { '': {} }
 });
 
-function valueOrDash(value) {
-	if (value === null || value === undefined || value === '')
-		return '-';
-	return value;
-}
-
 function field(root, name) {
 	return root.querySelector('[name="%s"]'.format(name));
 }
@@ -113,7 +107,7 @@ function devicePicker(devices, fieldName) {
 					ev.preventDefault();
 					addToField(document.querySelector('.singbox-manager-modal-form'), fieldName, device.ip);
 				}
-			}, label);
+			}, [ label ]);
 		}))
 	]);
 }
@@ -131,7 +125,7 @@ function showResult(result, fallback) {
 	if (result.ok)
 		return true;
 
-	ui.addNotification(null, E('p', (result.errors || [ fallback ]).join('; ')));
+	theme.error(result, fallback);
 	return false;
 }
 
@@ -140,7 +134,7 @@ function serverOptions(servers, current) {
 		return E('option', {
 			'value': server.id,
 			'selected': selected(server.id, current)
-		}, server.name || server.id);
+		}, [ server.name || server.id ]);
 	});
 }
 
@@ -228,7 +222,7 @@ function showServerModal(view, row) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('DNS server saved')));
+						theme.notify(_('DNS server saved'));
 						return refreshView(view);
 					});
 				})
@@ -250,7 +244,7 @@ function showDeleteServerModal(view, row) {
 						if (!showResult(result, _('Delete failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('DNS server deleted')));
+						theme.notify(_('DNS server deleted'));
 						return refreshView(view);
 					});
 				})
@@ -313,7 +307,7 @@ function showRuleModal(view, data, row) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('DNS rule saved')));
+						theme.notify(_('DNS rule saved'));
 						return refreshView(view);
 					});
 				})
@@ -335,7 +329,7 @@ function showDeleteRuleModal(view, row) {
 						if (!showResult(result, _('Delete failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('DNS rule deleted')));
+						theme.notify(_('DNS rule deleted'));
 						return refreshView(view);
 					});
 				})
@@ -366,7 +360,7 @@ function renderResolution(view, data) {
 					return callSetGroup(next).then(function(result) {
 						if (!showResult(result, _('Save failed')))
 							return refreshView(view);
-						ui.addNotification(null, E('p', _('Default resolver updated')));
+						theme.notify(_('Default resolver updated'));
 						return refreshView(view);
 					});
 				})
@@ -387,10 +381,10 @@ function renderServers(view, servers) {
 		])),
 		E('tbody', {}, servers.length ? servers.map(function(server) {
 			return E('tr', {}, [
-				E('td', {}, valueOrDash(server.name || server.id)),
-				E('td', {}, valueOrDash(server.type)),
-				E('td', {}, valueOrDash(server.address)),
-				E('td', {}, valueOrDash(server.detour)),
+				E('td', {}, theme.text(server.name || server.id)),
+				E('td', {}, theme.text(server.type)),
+				E('td', {}, theme.text(server.address)),
+				E('td', {}, theme.text(server.detour)),
 				E('td', {}, server.enabled ? _('Yes') : _('No')),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
@@ -399,9 +393,9 @@ function renderServers(view, servers) {
 						'click': ui.createHandlerFn(view, function() {
 							return callDNSTest(server.id, 'example.com').then(function(result) {
 								if (result.ok)
-									ui.addNotification(null, E('p', _('DNS test passed in %d ms').format(result.latency_ms || 0)));
+									theme.notify(_('DNS test passed in %d ms').format(result.latency_ms || 0));
 								else
-									ui.addNotification(null, E('p', (result.errors || [ _('DNS test failed') ]).join('; ')));
+									theme.error(result, _('DNS test failed'));
 							});
 						})
 					}, _('Test')),
@@ -434,10 +428,10 @@ function renderRules(view, data) {
 		])),
 		E('tbody', {}, rules.length ? rules.map(function(rule) {
 			return E('tr', {}, [
-				E('td', {}, valueOrDash(rule.name || rule.id)),
-				E('td', {}, (rule.sources || []).join(', ') || '-'),
-				E('td', {}, (rule.rulesets || []).join(', ') || '-'),
-				E('td', {}, valueOrDash(rule.server)),
+				E('td', {}, theme.text(rule.name || rule.id)),
+				E('td', {}, theme.text((rule.sources || []).join(', '))),
+				E('td', {}, theme.text((rule.rulesets || []).join(', '))),
+				E('td', {}, theme.text(rule.server)),
 				E('td', {}, rule.enabled ? _('Yes') : _('No')),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
@@ -458,7 +452,7 @@ function renderWarnings(warnings) {
 	warnings = warnings || [];
 	if (!warnings.length)
 		return '';
-	return E('div', { 'class': 'singbox-manager-warning' }, warnings.join('; '));
+	return E('div', { 'class': 'singbox-manager-warning' }, [ warnings.join('; ') ]);
 }
 
 function renderDebug(data) {
@@ -466,16 +460,20 @@ function renderDebug(data) {
 		E('summary', {}, _('Rendered DNS')),
 		E('div', { 'class': 'singbox-manager-grid' }, [
 			E('div', { 'class': 'singbox-manager-label' }, _('Active DNS inbound')),
-			E('pre', { 'class': 'singbox-manager-preview' }, JSON.stringify(data.active_dns_inbound || null, null, 2)),
+			E('pre', { 'class': 'singbox-manager-preview' }, [ JSON.stringify(data.active_dns_inbound || null, null, 2) ]),
 			E('div', { 'class': 'singbox-manager-label' }, _('Servers')),
-			E('pre', { 'class': 'singbox-manager-preview' }, JSON.stringify(data.rendered_servers || [], null, 2)),
+			E('pre', { 'class': 'singbox-manager-preview' }, [ JSON.stringify(data.rendered_servers || [], null, 2) ]),
 			E('div', { 'class': 'singbox-manager-label' }, _('Rules')),
-			E('pre', { 'class': 'singbox-manager-preview' }, JSON.stringify(data.rendered_rules || [], null, 2))
+			E('pre', { 'class': 'singbox-manager-preview' }, [ JSON.stringify(data.rendered_rules || [], null, 2) ])
 		])
 	]);
 }
 
 return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
 	load: function() {
 		return callDNS();
 	},

@@ -59,12 +59,6 @@ var callSetMode = rpc.declare({
 	expect: { '': {} }
 });
 
-function valueOrDash(value) {
-	if (value === null || value === undefined || value === '')
-		return '-';
-	return value;
-}
-
 function field(root, name) {
 	return root.querySelector('[name="%s"]'.format(name));
 }
@@ -120,7 +114,7 @@ function devicePicker(devices, fieldName) {
 					ev.preventDefault();
 					addToField(document.querySelector('.singbox-manager-modal-form'), fieldName, device.ip);
 				}
-			}, label);
+			}, [ label ]);
 		}))
 	]);
 }
@@ -138,7 +132,7 @@ function showResult(result, fallback) {
 	if (result.ok)
 		return true;
 
-	ui.addNotification(null, E('p', (result.errors || [ fallback ]).join('; ')));
+	theme.error(result, fallback);
 	return false;
 }
 
@@ -227,7 +221,7 @@ function showRouteRuleModal(view, data, row) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Route rule saved')));
+						theme.notify(_('Route rule saved'));
 						return refreshView(view);
 					});
 				})
@@ -249,7 +243,7 @@ function showDeleteRouteRuleModal(view, row) {
 						if (!showResult(result, _('Delete failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Route rule deleted')));
+						theme.notify(_('Route rule deleted'));
 						return refreshView(view);
 					});
 				})
@@ -324,7 +318,7 @@ function showRuleSetModal(view, row) {
 						if (!showResult(result, _('Save failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Rule set saved')));
+						theme.notify(_('Rule set saved'));
 						return refreshView(view);
 					});
 				})
@@ -346,7 +340,7 @@ function showDeleteRuleSetModal(view, row) {
 						if (!showResult(result, _('Delete failed')))
 							return;
 						ui.hideModal();
-						ui.addNotification(null, E('p', _('Rule set deleted')));
+						theme.notify(_('Rule set deleted'));
 						return refreshView(view);
 					});
 				})
@@ -359,7 +353,7 @@ function renderMode(view, data) {
 	var group = (data && data.group) || {};
 	return E('div', { 'class': 'singbox-manager-section' }, [
 		E('h3', {}, _('Routing Mode')),
-		(data.errors && data.errors.length) ? E('div', { 'class': 'singbox-manager-warning' }, data.errors.join('; ')) : '',
+		(data.errors && data.errors.length) ? E('div', { 'class': 'singbox-manager-warning' }, [ data.errors.join('; ') ]) : '',
 		E('div', { 'class': 'singbox-manager-controls' }, [
 			E('label', { 'class': 'singbox-manager-inline-control', 'title': _('direct = no proxy, global = everything proxied, rule = apply the route rules below') }, [
 				_('Mode'),
@@ -367,8 +361,8 @@ function renderMode(view, data) {
 					'class': 'cbi-input-select',
 					'change': ui.createHandlerFn(view, function(ev) {
 						return callSetMode(ev.target.value).then(function(result) {
-							showResult(result, _('Save failed'));
-							ui.addNotification(null, E('p', _('Runtime mode updated')));
+							if (showResult(result, _('Save failed')))
+								theme.notify(_('Runtime mode updated'));
 							return refreshView(view);
 						});
 					})
@@ -385,8 +379,8 @@ function renderMode(view, data) {
 					'change': ui.createHandlerFn(view, function(ev) {
 						var next = Object.assign({}, group, { route_final: ev.target.value });
 						return callSetGroup(next).then(function(result) {
-							showResult(result, _('Save failed'));
-							ui.addNotification(null, E('p', _('Final outbound updated')));
+							if (showResult(result, _('Save failed')))
+								theme.notify(_('Final outbound updated'));
 							return refreshView(view);
 						});
 					})
@@ -415,10 +409,10 @@ function renderRouteRules(view, data) {
 		])),
 		E('tbody', {}, rules.length ? rules.map(function(rule) {
 			return E('tr', {}, [
-				E('td', {}, valueOrDash(rule.name || rule.id)),
-				E('td', {}, (rule.sources || []).join(', ') || '-'),
-				E('td', {}, (rule.rulesets || []).join(', ') || '-'),
-				E('td', {}, valueOrDash(rule.outbound)),
+				E('td', {}, theme.text(rule.name || rule.id)),
+				E('td', {}, theme.text((rule.sources || []).join(', '))),
+				E('td', {}, theme.text((rule.rulesets || []).join(', '))),
+				E('td', {}, theme.text(rule.outbound)),
 				E('td', {}, rule.enabled ? _('Yes') : _('No')),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
@@ -446,9 +440,9 @@ function renderRuleSets(view, rulesets) {
 		])),
 		E('tbody', {}, rulesets.length ? rulesets.map(function(ruleset) {
 			return E('tr', {}, [
-				E('td', {}, valueOrDash(ruleset.name || ruleset.id)),
-				E('td', {}, valueOrDash(ruleset.type)),
-				E('td', {}, valueOrDash(ruleset.last_update)),
+				E('td', {}, theme.text(ruleset.name || ruleset.id)),
+				E('td', {}, theme.text(ruleset.type)),
+				E('td', {}, theme.text(ruleset.last_update)),
 				E('td', {}, ruleset.enabled ? _('Yes') : _('No')),
 				E('td', {}, E('div', { 'class': 'singbox-manager-actions' }, [
 					E('button', {
@@ -457,9 +451,9 @@ function renderRuleSets(view, rulesets) {
 						'click': ui.createHandlerFn(view, function() {
 							return callRefreshRuleSet(ruleset.id).then(function(result) {
 								if (result.ok)
-									ui.addNotification(null, E('p', _('Rule set updated (%d bytes)').format(result.bytes || 0)));
+									theme.notify(_('Rule set updated (%d bytes)').format(result.bytes || 0));
 								else
-									ui.addNotification(null, E('p', (result.errors || [ _('Update failed') ]).join('; ')));
+									theme.error(result, _('Update failed'));
 								return refreshView(view);
 							});
 						})
@@ -479,6 +473,10 @@ function renderRuleSets(view, rulesets) {
 }
 
 return view.extend({
+	handleSaveApply: null,
+	handleSave: null,
+	handleReset: null,
+
 	load: function() {
 		return callRouting();
 	},
