@@ -247,9 +247,20 @@ func applyJSONTLS(node *managerconfig.Node, raw any) {
 			node.Security = "tls"
 		}
 	}
-	if _, ok := tls["reality"].(map[string]any); ok {
+	if reality, ok := tls["reality"].(map[string]any); ok {
 		node.Security = "reality"
 		node.TLS = true
+		if pk := stringField(reality, "public_key"); pk != "" {
+			node.RealityPublicKey = pk
+		}
+		if sid := stringField(reality, "short_id"); sid != "" {
+			node.RealityShortID = sid
+		}
+	}
+	if utls, ok := tls["utls"].(map[string]any); ok {
+		if fp := stringField(utls, "fingerprint"); fp != "" {
+			node.Fingerprint = fp
+		}
 	}
 	if sni := stringField(tls, "server_name"); sni != "" {
 		node.SNI = sni
@@ -449,22 +460,25 @@ func parseStandardURI(raw string, typ string) (managerconfig.Node, error) {
 	query := parsed.Query()
 
 	node := managerconfig.Node{
-		Enabled:      true,
-		Type:         typ,
-		Name:         firstNonEmpty(name, host),
-		Server:       host,
-		Port:         port,
-		Security:     firstNonEmpty(query.Get("security"), query.Get("tls")),
-		TLS:          inSet(firstNonEmpty(query.Get("security"), query.Get("tls")), "tls", "reality"),
-		Transport:    normalizeTransport(firstNonEmpty(query.Get("type"), query.Get("transport"))),
-		Host:         query.Get("host"),
-		Path:         query.Get("path"),
-		SNI:          firstNonEmpty(query.Get("sni"), query.Get("peer"), query.Get("server_name")),
-		ALPN:         query.Get("alpn"),
-		Insecure:     isTruthy(firstNonEmpty(query.Get("insecure"), query.Get("allowInsecure"))),
-		Flow:         query.Get("flow"),
-		Congestion:   query.Get("congestion_control"),
-		UDPRelayMode: query.Get("udp_relay_mode"),
+		Enabled:          true,
+		Type:             typ,
+		Name:             firstNonEmpty(name, host),
+		Server:           host,
+		Port:             port,
+		Security:         firstNonEmpty(query.Get("security"), query.Get("tls")),
+		TLS:              inSet(firstNonEmpty(query.Get("security"), query.Get("tls")), "tls", "reality"),
+		Transport:        normalizeTransport(firstNonEmpty(query.Get("type"), query.Get("transport"))),
+		Host:             query.Get("host"),
+		Path:             query.Get("path"),
+		SNI:              firstNonEmpty(query.Get("sni"), query.Get("peer"), query.Get("server_name")),
+		ALPN:             query.Get("alpn"),
+		Insecure:         isTruthy(firstNonEmpty(query.Get("insecure"), query.Get("allowInsecure"))),
+		Flow:             query.Get("flow"),
+		RealityPublicKey: query.Get("pbk"),
+		RealityShortID:   query.Get("sid"),
+		Fingerprint:      query.Get("fp"),
+		Congestion:       query.Get("congestion_control"),
+		UDPRelayMode:     query.Get("udp_relay_mode"),
 	}
 
 	switch typ {

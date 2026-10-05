@@ -268,7 +268,7 @@ func applySections(cfg *Config, sections []section) error {
 
 func applyManager(cfg *Config, sec section) error {
 	allowed := map[string]bool{
-		"enabled": true, "log_level": true, "active_group": true, "runtime_mode": true,
+		"enabled": true, "paused": true, "log_level": true, "active_group": true, "runtime_mode": true,
 		"sing_box_bin": true, "socket_path": true, "api_listen": true,
 		"mixed_listen": true, "mixed_port": true, "tproxy_port": true, "dns_port": true,
 		"update_interval": true,
@@ -285,6 +285,8 @@ func applyManager(cfg *Config, sec section) error {
 		switch key {
 		case "enabled":
 			cfg.Manager.Enabled, err = parseBool(sec, key, value)
+		case "paused":
+			cfg.Manager.Paused, err = parseBool(sec, key, value)
 		case "log_level":
 			cfg.Manager.LogLevel = value
 		case "active_group":
@@ -414,6 +416,7 @@ func readNode(sec section) (Node, error) {
 		"port": true, "uuid": true, "password": true, "method": true, "security": true,
 		"tls": true, "flow": true, "transport": true, "host": true, "path": true, "sni": true,
 		"alpn": true, "insecure": true, "congestion": true, "udp_relay_mode": true,
+		"reality_public_key": true, "reality_short_id": true, "fingerprint": true,
 		"tag": true, "subscription": true, "health": true, "latency_ms": true, "last_check": true,
 	}); err != nil {
 		return Node{}, err
@@ -423,29 +426,32 @@ func readNode(sec section) (Node, error) {
 	}
 
 	node := Node{
-		ID:           sec.name,
-		Enabled:      true,
-		Name:         valueOrDefault(sec.options["name"], sec.name),
-		Type:         sec.options["type"],
-		Address:      sec.options["address"],
-		Server:       sec.options["server"],
-		UUID:         sec.options["uuid"],
-		Password:     sec.options["password"],
-		Method:       sec.options["method"],
-		Security:     sec.options["security"],
-		TLS:          false,
-		Flow:         sec.options["flow"],
-		Transport:    sec.options["transport"],
-		Host:         sec.options["host"],
-		Path:         sec.options["path"],
-		SNI:          sec.options["sni"],
-		ALPN:         sec.options["alpn"],
-		Congestion:   sec.options["congestion"],
-		UDPRelayMode: sec.options["udp_relay_mode"],
-		Tag:          valueOrDefault(sec.options["tag"], sec.name),
-		Subscription: sec.options["subscription"],
-		Health:       valueOrDefault(sec.options["health"], "unknown"),
-		LastCheck:    sec.options["last_check"],
+		ID:               sec.name,
+		Enabled:          true,
+		Name:             valueOrDefault(sec.options["name"], sec.name),
+		Type:             sec.options["type"],
+		Address:          sec.options["address"],
+		Server:           sec.options["server"],
+		UUID:             sec.options["uuid"],
+		Password:         sec.options["password"],
+		Method:           sec.options["method"],
+		Security:         sec.options["security"],
+		TLS:              false,
+		Flow:             sec.options["flow"],
+		Transport:        sec.options["transport"],
+		Host:             sec.options["host"],
+		Path:             sec.options["path"],
+		SNI:              sec.options["sni"],
+		ALPN:             sec.options["alpn"],
+		RealityPublicKey: sec.options["reality_public_key"],
+		RealityShortID:   sec.options["reality_short_id"],
+		Fingerprint:      sec.options["fingerprint"],
+		Congestion:       sec.options["congestion"],
+		UDPRelayMode:     sec.options["udp_relay_mode"],
+		Tag:              valueOrDefault(sec.options["tag"], sec.name),
+		Subscription:     sec.options["subscription"],
+		Health:           valueOrDefault(sec.options["health"], "unknown"),
+		LastCheck:        sec.options["last_check"],
 	}
 	if value, ok := sec.options["enabled"]; ok {
 		enabled, err := parseBool(sec, "enabled", value)

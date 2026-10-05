@@ -45,6 +45,13 @@ var callNodeLatencyTest = rpc.declare({
 	expect: { '': {} }
 });
 
+var callNodesURLTest = rpc.declare({
+	object: 'singbox.manager',
+	method: 'nodes_url_test',
+	params: [ 'url' ],
+	expect: { '': {} }
+});
+
 var callSetGroup = rpc.declare({
 	object: 'singbox.manager',
 	method: 'group_set',
@@ -469,7 +476,10 @@ var NODE_FIELDS = [
 	{ name: 'host', label: _('Transport host'), kind: 'text', types: TRANSPORT_TYPES },
 	{ name: 'path', label: _('Transport path'), kind: 'text', placeholder: '/path', types: TRANSPORT_TYPES },
 	{ name: 'sni', label: _('TLS SNI'), kind: 'text', types: TLS_TYPES },
-	{ name: 'alpn', label: _('TLS ALPN'), kind: 'text', placeholder: 'h2, http/1.1', types: TLS_TYPES }
+	{ name: 'alpn', label: _('TLS ALPN'), kind: 'text', placeholder: 'h2, http/1.1', types: TLS_TYPES },
+	{ name: 'reality_public_key', label: _('Reality public key'), kind: 'text', placeholder: _('pbk (enables Reality)'), types: [ 'vless' ] },
+	{ name: 'reality_short_id', label: _('Reality short ID'), kind: 'text', placeholder: 'sid', types: [ 'vless' ] },
+	{ name: 'fingerprint', label: _('uTLS fingerprint'), kind: 'select', options: [ '', 'chrome', 'firefox', 'safari', 'ios', 'android', 'edge', 'random' ], types: [ 'vless' ] }
 ];
 
 var NODE_FLAGS = [
@@ -532,6 +542,10 @@ function readNode(root, row) {
 		var input = field(root, def.name);
 		node[def.name] = input ? input.checked : false;
 	});
+	// A Reality public key is what distinguishes a Reality VLESS node from a plain
+	// TLS one, so its presence selects reality mode (the renderer keys off this).
+	if (type === 'vless' && node.reality_public_key)
+		node.security = 'reality';
 	return node;
 }
 
@@ -803,6 +817,22 @@ function renderNodes(view, nodes, subscriptions, selectedNode) {
 	return E('div', { 'class': 'singbox-manager-section' }, [
 		E('div', { 'class': 'singbox-manager-section-header' }, [
 			E('h3', {}, _('Nodes')),
+			E('button', {
+				'class': 'btn cbi-button',
+				'click': ui.createHandlerFn(view, function() {
+					ui.addNotification(null, E('p', _('Testing all nodes through their proxies…')), 'info');
+					return callNodesURLTest('').then(function(result) {
+						if (!result.ok) {
+							ui.addNotification(null, E('p', (result.errors || [ _('Test all failed') ]).join('; ')));
+							return refreshView(view);
+						}
+						var nodes = result.nodes || [];
+						var ok = nodes.filter(function(n) { return n.health === 'ok'; }).length;
+						ui.addNotification(null, E('p', _('Tested %d nodes: %d reachable').format(nodes.length, ok)), 'info');
+						return refreshView(view);
+					});
+				})
+			}, _('Test all')),
 			E('button', {
 				'class': 'btn cbi-button cbi-button-add',
 				'click': ui.createHandlerFn(view, function() {

@@ -38,6 +38,7 @@ const (
 
 type ManagerConfig struct {
 	Enabled       bool   `json:"enabled"`
+	Paused        bool   `json:"paused"`
 	ActiveGroup   string `json:"active_group"`
 	RuntimeMode   string `json:"runtime_mode"`
 	SelectedNode  string `json:"selected_node"`
@@ -55,6 +56,7 @@ type ManagerConfig struct {
 type Status struct {
 	Daemon             bool   `json:"daemon"`
 	ManagerEnabled     bool   `json:"manager_enabled"`
+	ManagerPaused      bool   `json:"manager_paused"`
 	Running            bool   `json:"running"`
 	SingBoxPID         int    `json:"sing_box_pid"`
 	ActiveGroup        string `json:"active_group"`
@@ -127,29 +129,32 @@ type SubscriptionPayload struct {
 }
 
 type NodePayload struct {
-	ID           string `json:"id"`
-	Enabled      *bool  `json:"enabled,omitempty"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	Address      string `json:"address"`
-	Server       string `json:"server"`
-	Port         int    `json:"port"`
-	UUID         string `json:"uuid"`
-	Password     string `json:"password"`
-	Method       string `json:"method"`
-	Security     string `json:"security"`
-	TLS          bool   `json:"tls"`
-	Flow         string `json:"flow"`
-	Transport    string `json:"transport"`
-	Host         string `json:"host"`
-	Path         string `json:"path"`
-	SNI          string `json:"sni"`
-	ALPN         string `json:"alpn"`
-	Insecure     bool   `json:"insecure"`
-	Congestion   string `json:"congestion"`
-	UDPRelayMode string `json:"udp_relay_mode"`
-	Tag          string `json:"tag"`
-	Subscription string `json:"subscription"`
+	ID               string `json:"id"`
+	Enabled          *bool  `json:"enabled,omitempty"`
+	Name             string `json:"name"`
+	Type             string `json:"type"`
+	Address          string `json:"address"`
+	Server           string `json:"server"`
+	Port             int    `json:"port"`
+	UUID             string `json:"uuid"`
+	Password         string `json:"password"`
+	Method           string `json:"method"`
+	Security         string `json:"security"`
+	TLS              bool   `json:"tls"`
+	Flow             string `json:"flow"`
+	Transport        string `json:"transport"`
+	Host             string `json:"host"`
+	Path             string `json:"path"`
+	SNI              string `json:"sni"`
+	ALPN             string `json:"alpn"`
+	Insecure         bool   `json:"insecure"`
+	RealityPublicKey string `json:"reality_public_key"`
+	RealityShortID   string `json:"reality_short_id"`
+	Fingerprint      string `json:"fingerprint"`
+	Congestion       string `json:"congestion"`
+	UDPRelayMode     string `json:"udp_relay_mode"`
+	Tag              string `json:"tag"`
+	Subscription     string `json:"subscription"`
 }
 
 type GroupPayload struct {
@@ -362,7 +367,11 @@ func startRuntimeSupervisor(configPath string) {
 		log.Printf("runtime supervision attached to existing sing-box process")
 		return
 	}
-	if !cfg.Manager.Enabled {
+	if !cfg.Manager.Active() {
+		// Management-only: keep serving the UI/RPC but never bring the proxy or
+		// its firewall rules up on our own. Honours singbox-manager.main.paused
+		// so a reboot does not silently divert the admin's LAN.
+		log.Printf("runtime supervision idle (enabled=%v paused=%v); serving management RPC only", cfg.Manager.Enabled, cfg.Manager.Paused)
 		return
 	}
 	// Cold start: after a reboot the pid file lives on tmpfs and nothing is
@@ -384,7 +393,7 @@ func startSubscriptionScheduler(configPath string) {
 				log.Printf("scheduled subscription update skipped: %v", err)
 				continue
 			}
-			if !cfg.Manager.Enabled {
+			if !cfg.Manager.Active() {
 				continue
 			}
 			now := time.Now().UTC()
@@ -415,10 +424,10 @@ func startHealthScheduler(configPath string) {
 				continue
 			}
 			delay = healthInterval(*cfg)
-			if !cfg.Manager.Enabled {
+			if !cfg.Manager.Active() {
 				continue
 			}
-			result := health.Check(context.Background(), *cfg)
+			result := health.CheckURL(context.Background(), *cfg, probeOptions(*cfg, ""))
 			nodes, groups, subscriptions := health.ToHealthStates(result)
 			if err := managerconfig.UpdateHealth(configPath, nodes, groups, subscriptions); err != nil {
 				log.Printf("scheduled health check failed: %v", err)
@@ -449,7 +458,7 @@ func startRuleSetScheduler(configPath string) {
 				log.Printf("scheduled ruleset update skipped: %v", err)
 				continue
 			}
-			if !cfg.Manager.Enabled {
+			if !cfg.Manager.Active() {
 				continue
 			}
 			proxyAddr := localProxyAddr(*cfg)
@@ -486,6 +495,7 @@ func runRPCD(args []string) {
 			"reload":                {},
 			"validate":              {},
 			"manager_set_enabled":   {"enabled": "boolean"},
+			"manager_set_paused":    {"paused": "boolean"},
 			"manager_set_mode":      {"mode": "string"},
 			"group_set":             {"group": "object"},
 			"subscriptions":         {},
@@ -500,6 +510,7 @@ func runRPCD(args []string) {
 			"node_select":           {"id": "string"},
 			"node_ping_test":        {"id": "string"},
 			"node_latency_test":     {"id": "string", "url": "string"},
+			"nodes_url_test":        {"url": "string"},
 			"health_check":          {},
 			"latency_test":          {"url": "string"},
 			"dns":                   {},
@@ -534,6 +545,20 @@ func runRPCD(args []string) {
 	}
 }
 
+// clientTimeout bounds how long the CLI/rpcd wrapper waits for the daemon. Most
+// RPCs are near-instant, but the real node tests stand up a throwaway sing-box
+// and run per-node delay probes, which take well over the default few seconds.
+func clientTimeout(method string) time.Duration {
+	switch method {
+	case "nodes_url_test", "health_check":
+		return 120 * time.Second
+	case "node_latency_test", "node_ping_test", "latency_test", "dns_test":
+		return 30 * time.Second
+	default:
+		return 5 * time.Second
+	}
+}
+
 func callDaemon(method string, input io.Reader) {
 	cfg, err := loadConfig(defaultConfigPath)
 	if err != nil {
@@ -548,7 +573,7 @@ func callDaemon(method string, input io.Reader) {
 
 	reqBody, _ := json.Marshal(RPCRequest{Method: method, Params: params})
 	client := http.Client{
-		Timeout: 5 * time.Second,
+		Timeout: clientTimeout(method),
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 				dialer := net.Dialer{}
@@ -627,6 +652,8 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, nodeLatencyTest(configPath, req.Params))
 	case "health_check":
 		writeHTTPJSON(w, http.StatusOK, healthCheck(configPath))
+	case "nodes_url_test":
+		writeHTTPJSON(w, http.StatusOK, nodesURLTest(configPath, req.Params))
 	case "latency_test":
 		writeHTTPJSON(w, http.StatusOK, latencyTest(req.Params))
 	case "dns":
@@ -668,13 +695,15 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 	case "tun_set":
 		writeHTTPJSON(w, http.StatusOK, applyMutation(configPath, setTUN(configPath, req.Params)))
 	case "start":
-		writeHTTPJSON(w, http.StatusOK, controlRuntime(configPath, runtime.ActionStart))
+		writeHTTPJSON(w, http.StatusOK, startRuntime(configPath))
 	case "stop":
-		writeHTTPJSON(w, http.StatusOK, controlRuntime(configPath, runtime.ActionStop))
+		writeHTTPJSON(w, http.StatusOK, stopRuntime(configPath))
 	case "restart":
-		writeHTTPJSON(w, http.StatusOK, controlRuntime(configPath, runtime.ActionRestart))
+		writeHTTPJSON(w, http.StatusOK, restartRuntime(configPath))
 	case "reload":
 		writeHTTPJSON(w, http.StatusOK, controlRuntime(configPath, runtime.ActionReload))
+	case "manager_set_paused":
+		writeHTTPJSON(w, http.StatusOK, setManagerPaused(configPath, req.Params))
 	default:
 		writeHTTPJSON(w, http.StatusNotFound, RPCError{Error: "unknown method"})
 	}
@@ -1443,7 +1472,7 @@ func nodeLatencyTest(configPath string, raw json.RawMessage) map[string]any {
 		return validationResult(false, runtime.Result{}, fmt.Errorf("node %q not found", params.ID))
 	}
 
-	result, err := health.TestNodeURL(context.Background(), node, params.URL)
+	result, err := health.TestNodeURL(context.Background(), node, probeOptions(*cfg, params.URL))
 	nodes := map[string]managerconfig.HealthState{
 		params.ID: {Health: result.Health, LatencyMS: result.LatencyMS},
 	}
@@ -1472,7 +1501,7 @@ func healthCheck(configPath string) map[string]any {
 	if err != nil {
 		return validationResult(false, runtime.Result{}, err)
 	}
-	result := health.Check(context.Background(), *cfg)
+	result := health.CheckURL(context.Background(), *cfg, probeOptions(*cfg, ""))
 	nodes, groups, subscriptions := health.ToHealthStates(result)
 	if err := managerconfig.UpdateHealth(configPath, nodes, groups, subscriptions); err != nil {
 		return validationResult(false, runtime.Result{}, err)
@@ -1482,6 +1511,48 @@ func healthCheck(configPath string) map[string]any {
 		"nodes":         result.Nodes,
 		"groups":        result.Groups,
 		"subscriptions": result.Subscriptions,
+	}
+}
+
+// nodesURLTest runs a real, through-the-proxy delay test against every node
+// concurrently (one throwaway sing-box instance, parallel Clash API delay
+// calls) and persists the per-node results.
+func nodesURLTest(configPath string, raw json.RawMessage) map[string]any {
+	var params LatencyParams
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return validationResult(false, runtime.Result{}, err)
+		}
+	}
+	cfg, err := managerconfig.Load(configPath)
+	if err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	nodes := make([]managerconfig.Node, 0, len(cfg.Nodes))
+	for _, node := range cfg.Nodes {
+		nodes = append(nodes, node)
+	}
+	results := health.ProbeNodes(context.Background(), probeOptions(*cfg, params.URL), nodes)
+
+	states := make(map[string]managerconfig.HealthState, len(results))
+	list := make([]health.EndpointResult, 0, len(results))
+	for id, result := range results {
+		states[id] = managerconfig.HealthState{Health: result.Health, LatencyMS: result.LatencyMS}
+		list = append(list, result)
+	}
+	if err := managerconfig.UpdateHealth(configPath, states, nil, nil); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
+	return map[string]any{"ok": true, "nodes": list, "tested": len(list)}
+}
+
+// probeOptions builds the real-test configuration from the manager config. The
+// test URL falls back to the health package default when the caller omits it.
+func probeOptions(cfg managerconfig.Config, testURL string) health.ProbeOptions {
+	return health.ProbeOptions{
+		Binary:  cfg.Manager.SingBoxBinary,
+		TestURL: testURL,
 	}
 }
 
@@ -1570,6 +1641,51 @@ func controlRuntime(configPath string, action runtime.Action) map[string]any {
 	return response
 }
 
+// startRuntime brings the proxy up and clears the management-only hold, so the
+// supervisor keeps it running and a reboot restores it.
+func startRuntime(configPath string) map[string]any {
+	_ = managerconfig.SetManagerPaused(configPath, false)
+	return controlRuntime(configPath, runtime.ActionStart)
+}
+
+// restartRuntime restarts the proxy and clears the management-only hold.
+func restartRuntime(configPath string) map[string]any {
+	_ = managerconfig.SetManagerPaused(configPath, false)
+	return controlRuntime(configPath, runtime.ActionRestart)
+}
+
+// stopRuntime takes the proxy down and engages the management-only hold, so
+// neither the supervisor nor a reboot brings it back until an explicit start.
+// This is the LAN-safety guarantee: stopping stays stopped.
+func stopRuntime(configPath string) map[string]any {
+	result := controlRuntime(configPath, runtime.ActionStop)
+	_ = managerconfig.SetManagerPaused(configPath, true)
+	return result
+}
+
+// setManagerPaused toggles the management-only hold and reconciles the data path
+// immediately: pausing tears the proxy down, resuming brings it back when the
+// manager is enabled.
+func setManagerPaused(configPath string, raw json.RawMessage) map[string]any {
+	var params struct {
+		Paused bool `json:"paused"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &params); err != nil {
+			return validationResult(false, runtime.Result{}, err)
+		}
+	}
+	if err := managerconfig.SetManagerPaused(configPath, params.Paused); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	if params.Paused {
+		controlRuntime(configPath, runtime.ActionStop)
+	} else if cfg, err := managerconfig.Load(configPath); err == nil && cfg.Manager.Enabled {
+		controlRuntime(configPath, runtime.ActionStart)
+	}
+	return map[string]any{"ok": true, "paused": params.Paused}
+}
+
 func validationResult(ok bool, result runtime.Result, err error) map[string]any {
 	errors := []string{}
 	if err != nil {
@@ -1619,6 +1735,7 @@ func compactConfig(cfg managerconfig.Config) ManagerConfig {
 	}
 	return ManagerConfig{
 		Enabled:       cfg.Manager.Enabled,
+		Paused:        cfg.Manager.Paused,
 		ActiveGroup:   cfg.Manager.ActiveGroup,
 		RuntimeMode:   cfg.Manager.RuntimeMode,
 		SelectedNode:  selected,
@@ -1655,6 +1772,7 @@ func collectStatus(cfg ManagerConfig) Status {
 	return Status{
 		Daemon:             true,
 		ManagerEnabled:     cfg.Enabled,
+		ManagerPaused:      cfg.Paused,
 		Running:            pid > 0,
 		SingBoxPID:         pid,
 		ActiveGroup:        cfg.ActiveGroup,
@@ -2338,29 +2456,32 @@ func nodeFromPayload(payload NodePayload) managerconfig.Node {
 		tag = payload.ID
 	}
 	return managerconfig.Node{
-		ID:           payload.ID,
-		Enabled:      enabled,
-		Name:         name,
-		Type:         payload.Type,
-		Address:      payload.Address,
-		Server:       payload.Server,
-		Port:         payload.Port,
-		UUID:         payload.UUID,
-		Password:     payload.Password,
-		Method:       payload.Method,
-		Security:     payload.Security,
-		TLS:          payload.TLS,
-		Flow:         payload.Flow,
-		Transport:    payload.Transport,
-		Host:         payload.Host,
-		Path:         payload.Path,
-		SNI:          payload.SNI,
-		ALPN:         payload.ALPN,
-		Insecure:     payload.Insecure,
-		Congestion:   payload.Congestion,
-		UDPRelayMode: payload.UDPRelayMode,
-		Tag:          tag,
-		Subscription: payload.Subscription,
+		ID:               payload.ID,
+		Enabled:          enabled,
+		Name:             name,
+		Type:             payload.Type,
+		Address:          payload.Address,
+		Server:           payload.Server,
+		Port:             payload.Port,
+		UUID:             payload.UUID,
+		Password:         payload.Password,
+		Method:           payload.Method,
+		Security:         payload.Security,
+		TLS:              payload.TLS,
+		Flow:             payload.Flow,
+		Transport:        payload.Transport,
+		Host:             payload.Host,
+		Path:             payload.Path,
+		SNI:              payload.SNI,
+		ALPN:             payload.ALPN,
+		Insecure:         payload.Insecure,
+		RealityPublicKey: payload.RealityPublicKey,
+		RealityShortID:   payload.RealityShortID,
+		Fingerprint:      payload.Fingerprint,
+		Congestion:       payload.Congestion,
+		UDPRelayMode:     payload.UDPRelayMode,
+		Tag:              tag,
+		Subscription:     payload.Subscription,
 	}
 }
 

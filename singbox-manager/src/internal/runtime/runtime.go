@@ -363,11 +363,42 @@ func RunningPID(paths Paths) int {
 	if err != nil || pid <= 0 {
 		return 0
 	}
-	if !pidAlive(pid) {
+	// The pidfile lives on tmpfs and only records the pid we last spawned. After
+	// sing-box exits, its pid can be recycled by an unrelated process, and a bare
+	// liveness probe would then report that stranger as a running sing-box. The
+	// supervisor would see RunningPID > 0 forever and never restart the real
+	// runtime, leaving the tproxy rules in place and black-holing traffic. Confirm
+	// the pid is actually our sing-box by matching the runtime config path in its
+	// argv before trusting it, and drop the stale pidfile when it is not.
+	if !pidAlive(pid) || !processHasConfig(pid, paths.RuntimeConfig) {
 		_ = os.Remove(paths.PIDFile)
 		return 0
 	}
 	return pid
+}
+
+// processHasConfig reports whether the given pid's argv contains configPath,
+// i.e. the process is the sing-box instance the manager started with that
+// runtime config. An empty configPath disables the check (the caller cannot
+// identify the expected process), falling back to the liveness probe alone.
+func processHasConfig(pid int, configPath string) bool {
+	if configPath == "" {
+		return true
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return false
+	}
+	return cmdlineHasArg(data, configPath)
+}
+
+func cmdlineHasArg(data []byte, arg string) bool {
+	for _, part := range strings.Split(strings.TrimRight(string(data), "\x00"), "\x00") {
+		if part == arg {
+			return true
+		}
+	}
+	return false
 }
 
 func runSingBoxCheck(binary string, configPath string) (string, error) {

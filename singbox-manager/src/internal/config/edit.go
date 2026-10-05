@@ -264,6 +264,22 @@ func SetManagerEnabled(path string, enabled bool) error {
 	})
 }
 
+func SetManagerPaused(path string, paused bool) error {
+	return editConfig(path, func(sections []section) ([]section, error) {
+		for i := range sections {
+			if sections[i].typ != "manager" || sections[i].name != "main" {
+				continue
+			}
+			if sections[i].options == nil {
+				sections[i].options = map[string]string{}
+			}
+			sections[i].options["paused"] = boolString(paused)
+			return sections, nil
+		}
+		return nil, fmt.Errorf("manager main section not found")
+	})
+}
+
 func SetManagerRuntimeMode(path string, mode string) error {
 	if !inSet(mode, "direct", "rule", "global") {
 		return fmt.Errorf("runtime mode must be direct, rule, or global, got %q", mode)
@@ -638,6 +654,9 @@ func nodeSection(node Node) section {
 	if node.Insecure {
 		options["insecure"] = "1"
 	}
+	set("reality_public_key", node.RealityPublicKey)
+	set("reality_short_id", node.RealityShortID)
+	set("fingerprint", node.Fingerprint)
 	set("congestion", node.Congestion)
 	set("udp_relay_mode", node.UDPRelayMode)
 	set("tag", valueOrDefault(node.Tag, node.ID))

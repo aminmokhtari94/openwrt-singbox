@@ -188,9 +188,11 @@ function renderHero(view, data) {
 			})
 		}, _('Start'));
 
+	var paused = !running && !!data.manager_paused;
 	var subtitle = running
 		? _('PID %s').format(valueOrDash(data.sing_box_pid))
-		: (data.manager_enabled ? _('Manager enabled') : _('Manager disabled'));
+		: (paused ? _('Management mode — proxy held down, LAN untouched')
+			: (data.manager_enabled ? _('Manager enabled') : _('Manager disabled')));
 
 	var modeSelect = E('select', {
 		'class': 'cbi-input-select',
@@ -208,7 +210,7 @@ function renderHero(view, data) {
 		E('div', { 'class': 'singbox-manager-hero-status' }, [
 			E('span', { 'class': 'singbox-manager-dot' + (running ? ' on' : (data.daemon ? ' idle' : ' off')) }),
 			E('div', {}, [
-				E('div', { 'class': 'singbox-manager-hero-state' }, running ? _('Running') : _('Stopped')),
+				E('div', { 'class': 'singbox-manager-hero-state' }, running ? _('Running') : (paused ? _('Paused') : _('Stopped'))),
 				E('div', { 'class': 'singbox-manager-hero-sub' }, subtitle)
 			])
 		]),

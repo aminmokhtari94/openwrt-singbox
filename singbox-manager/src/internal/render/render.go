@@ -303,6 +303,75 @@ func renderURLTest(tags []string) map[string]any {
 	}
 }
 
+// ProbeAPI describes the Clash API controller embedded in a probe config so an
+// external caller can delay-test each outbound through it.
+type ProbeAPI struct {
+	Listen string
+	Secret string
+}
+
+// BuildProbeConfig renders a minimal sing-box config whose sole purpose is
+// delay-testing the given nodes through their real outbounds via the Clash API.
+// Unlike the main runtime config it carries no inbounds, DNS, or routing: the
+// Clash API's /proxies/{tag}/delay endpoint dials straight through the outbound,
+// which is exactly the end-to-end path (TLS/transport/auth) a genuine test must
+// exercise.
+//
+// It returns the config JSON and a map from node ID to the outbound tag the
+// Clash API knows the node by. Nodes whose transport sing-box cannot render, or
+// that collide on an outbound tag, are omitted and reported in skipped so the
+// caller can surface an explicit per-node error instead of a silent pass.
+func BuildProbeConfig(nodes []managerconfig.Node, api ProbeAPI) (data []byte, tags map[string]string, skipped map[string]error, err error) {
+	outbounds := []map[string]any{
+		{"type": "direct", "tag": "direct"},
+		{"type": "block", "tag": "block"},
+	}
+	tags = map[string]string{}
+	skipped = map[string]error{}
+	seen := map[string]bool{"direct": true, "block": true}
+
+	for _, node := range nodes {
+		if !node.Enabled {
+			continue
+		}
+		outbound, renderErr := renderNodeOutbound(node)
+		if renderErr != nil {
+			skipped[node.ID] = renderErr
+			continue
+		}
+		tag := stringValue(outbound["tag"])
+		if tag == "" || seen[tag] {
+			// Fall back to the node ID (and ultimately skip) so one node never
+			// shadows another's delay result under a shared tag.
+			tag = node.ID
+			outbound["tag"] = tag
+		}
+		if seen[tag] {
+			skipped[node.ID] = fmt.Errorf("node %q collides on outbound tag %q", node.ID, tag)
+			continue
+		}
+		seen[tag] = true
+		tags[node.ID] = tag
+		outbounds = append(outbounds, outbound)
+	}
+
+	document := map[string]any{
+		"log":       map[string]any{"level": "error", "timestamp": true},
+		"outbounds": outbounds,
+		"experimental": map[string]any{
+			"clash_api": map[string]any{
+				"external_controller": api.Listen,
+				"secret":              api.Secret,
+			},
+		},
+	}
+	data, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return append(data, '\n'), tags, skipped, nil
+}
+
 func renderNodeOutbound(node managerconfig.Node) (map[string]any, error) {
 	tag := node.Tag
 	if tag == "" {
@@ -346,8 +415,13 @@ func renderNodeOutbound(node managerconfig.Node) (map[string]any, error) {
 			"server_port": node.Port,
 			"uuid":        node.UUID,
 		}
-		if node.Security != "" {
-			outbound["security"] = node.Security
+		// For VMess, "security" is the cipher — not the transport security. Share
+		// links overload the field with "tls"/"reality", which sing-box rejects as
+		// a cipher ("unsupported security type: tls"); those are transport security
+		// and belong to the TLS block that addTLS renders. Only forward a genuine
+		// VMess cipher here and let anything else fall through to addTLS.
+		if cipher := vmessCipher(node.Security); cipher != "" {
+			outbound["security"] = cipher
 		}
 		addTLS(outbound, node)
 		if err := addTransport(outbound, node); err != nil {
@@ -416,7 +490,37 @@ func addTLS(outbound map[string]any, node managerconfig.Node) {
 	if node.Insecure {
 		tls["insecure"] = true
 	}
+	if node.Security == "reality" {
+		// Reality replaces the normal certificate handshake: sing-box needs the
+		// server's public key and short ID, and mandates a uTLS fingerprint to
+		// mimic a real client. Reality is incompatible with insecure, so drop it.
+		reality := map[string]any{"enabled": true}
+		if node.RealityPublicKey != "" {
+			reality["public_key"] = node.RealityPublicKey
+		}
+		if node.RealityShortID != "" {
+			reality["short_id"] = node.RealityShortID
+		}
+		tls["reality"] = reality
+		delete(tls, "insecure")
+		tls["utls"] = map[string]any{
+			"enabled":     true,
+			"fingerprint": firstNonEmptyString(node.Fingerprint, "chrome"),
+		}
+	} else if node.Fingerprint != "" {
+		// A uTLS fingerprint can also apply to plain TLS outbounds.
+		tls["utls"] = map[string]any{"enabled": true, "fingerprint": node.Fingerprint}
+	}
 	outbound["tls"] = tls
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func addTransport(outbound map[string]any, node managerconfig.Node) error {
@@ -458,6 +562,19 @@ func addTransport(outbound map[string]any, node managerconfig.Node) error {
 	}
 	outbound["transport"] = transport
 	return nil
+}
+
+// vmessCipher returns value only when it is a VMess cipher sing-box accepts;
+// otherwise "" so the outbound omits it (sing-box defaults to "auto"). This
+// filters out transport-security markers like "tls"/"reality" that subscription
+// links wrongly place in the security field.
+func vmessCipher(value string) string {
+	switch value {
+	case "auto", "none", "zero", "aes-128-gcm", "chacha20-poly1305":
+		return value
+	default:
+		return ""
+	}
 }
 
 func splitCSV(value string) []string {

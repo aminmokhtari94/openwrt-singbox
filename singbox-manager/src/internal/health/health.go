@@ -99,6 +99,23 @@ func TestDNS(ctx context.Context, server managerconfig.DNSServer, domain string)
 
 func Check(ctx context.Context, cfg managerconfig.Config) Result {
 	nodeResults := checkNodes(ctx, cfg)
+	return aggregate(cfg, nodeResults)
+}
+
+// CheckURL is Check's real, through-the-proxy variant: it delay-tests every node
+// end-to-end (see ProbeNodes) instead of merely TCP-connecting to the server, so
+// a node only counts as healthy when traffic genuinely flows through it. Group
+// and subscription health roll up from those real results exactly as in Check.
+func CheckURL(ctx context.Context, cfg managerconfig.Config, opts ProbeOptions) Result {
+	nodes := make([]managerconfig.Node, 0, len(cfg.Nodes))
+	for _, node := range cfg.Nodes {
+		nodes = append(nodes, node)
+	}
+	nodeResults := ProbeNodes(ctx, opts, nodes)
+	return aggregate(cfg, nodeResults)
+}
+
+func aggregate(cfg managerconfig.Config, nodeResults map[string]EndpointResult) Result {
 	return Result{
 		Nodes:         sortedResults(nodeResults),
 		Subscriptions: checkSubscriptions(cfg, nodeResults),
@@ -207,23 +224,23 @@ func PingNode(ctx context.Context, node managerconfig.Node) EndpointResult {
 	return result
 }
 
-func TestNodeURL(ctx context.Context, node managerconfig.Node, rawURL string) (EndpointResult, error) {
-	if rawURL == "" {
-		rawURL = DefaultTestURL
+// TestNodeURL runs a single node's real, through-the-proxy delay test. It is the
+// one-node form of ProbeNodes: the result is "ok" only when an HTTP request
+// actually completed through the node's outbound, so it no longer reports a dead
+// but TCP-reachable (e.g. CDN-fronted) server as healthy.
+func TestNodeURL(ctx context.Context, node managerconfig.Node, opts ProbeOptions) (EndpointResult, error) {
+	result := ProbeNodes(ctx, opts, []managerconfig.Node{node})[node.ID]
+	if result.ID == "" {
+		result.ID = node.ID
 	}
-	result := CheckNode(ctx, node)
-	result.Method = "tcp"
-	if result.Error != "" || result.Health != "ok" {
-		if result.Error == "" {
-			result.Error = fmt.Sprintf("node health is %s", result.Health)
+	if result.Health != "ok" {
+		msg := result.Error
+		if msg == "" {
+			msg = fmt.Sprintf("node health is %s", result.Health)
 		}
-		return result, fmt.Errorf("%s", result.Error)
+		return result, fmt.Errorf("%s", msg)
 	}
-
-	urlResult, err := TestURL(ctx, rawURL)
-	urlResult.ID = node.ID
-	urlResult.Method = "url"
-	return urlResult, err
+	return result, nil
 }
 
 func checkSubscriptions(cfg managerconfig.Config, nodeResults map[string]EndpointResult) []EndpointResult {

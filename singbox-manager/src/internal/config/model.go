@@ -20,6 +20,7 @@ type Config struct {
 
 type Manager struct {
 	Enabled        bool
+	Paused         bool
 	LogLevel       string
 	ActiveGroup    string
 	RuntimeMode    string
@@ -31,6 +32,15 @@ type Manager struct {
 	TProxyPort     int
 	DNSPort        int
 	UpdateInterval string
+}
+
+// Active reports whether the manager should keep sing-box and its firewall rules
+// up. Paused is a management-only hold: the daemon keeps serving the UI/RPC (so
+// nodes can be imported and tested), but the data path stays down so the admin's
+// own LAN is never diverted until the proxy is explicitly started again. It is
+// persisted in UCI, so the supervisor honours it across reboots and respawns.
+func (m Manager) Active() bool {
+	return m.Enabled && !m.Paused
 }
 
 // Group bundles a set of subscriptions, a proxy selection strategy, and the
@@ -65,32 +75,37 @@ type Subscription struct {
 }
 
 type Node struct {
-	ID           string `json:"id"`
-	Enabled      bool   `json:"enabled"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	Address      string `json:"address"`
-	Server       string `json:"server"`
-	Port         int    `json:"port"`
-	UUID         string `json:"uuid"`
-	Password     string `json:"password"`
-	Method       string `json:"method"`
-	Security     string `json:"security"`
-	TLS          bool   `json:"tls"`
-	Flow         string `json:"flow"`
-	Transport    string `json:"transport"`
-	Host         string `json:"host"`
-	Path         string `json:"path"`
-	SNI          string `json:"sni"`
-	ALPN         string `json:"alpn"`
-	Insecure     bool   `json:"insecure"`
-	Congestion   string `json:"congestion"`
-	UDPRelayMode string `json:"udp_relay_mode"`
-	Tag          string `json:"tag"`
-	Subscription string `json:"subscription"`
-	Health       string `json:"health"`
-	LatencyMS    int    `json:"latency_ms"`
-	LastCheck    string `json:"last_check"`
+	ID        string `json:"id"`
+	Enabled   bool   `json:"enabled"`
+	Name      string `json:"name"`
+	Type      string `json:"type"`
+	Address   string `json:"address"`
+	Server    string `json:"server"`
+	Port      int    `json:"port"`
+	UUID      string `json:"uuid"`
+	Password  string `json:"password"`
+	Method    string `json:"method"`
+	Security  string `json:"security"`
+	TLS       bool   `json:"tls"`
+	Flow      string `json:"flow"`
+	Transport string `json:"transport"`
+	Host      string `json:"host"`
+	Path      string `json:"path"`
+	SNI       string `json:"sni"`
+	ALPN      string `json:"alpn"`
+	Insecure  bool   `json:"insecure"`
+	// Reality (VLESS Reality) parameters. PublicKey/ShortID come from the share
+	// link's pbk/sid; Fingerprint is the uTLS fingerprint (fp, e.g. "chrome").
+	RealityPublicKey string `json:"reality_public_key"`
+	RealityShortID   string `json:"reality_short_id"`
+	Fingerprint      string `json:"fingerprint"`
+	Congestion       string `json:"congestion"`
+	UDPRelayMode     string `json:"udp_relay_mode"`
+	Tag              string `json:"tag"`
+	Subscription     string `json:"subscription"`
+	Health           string `json:"health"`
+	LatencyMS        int    `json:"latency_ms"`
+	LastCheck        string `json:"last_check"`
 }
 
 // DNSServer is an upstream resolver definition shared across groups.

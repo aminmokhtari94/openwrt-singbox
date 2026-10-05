@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -119,6 +120,40 @@ func TestRemovePIDFileIfMatches(t *testing.T) {
 	removePIDFileIfMatches(path, 123)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("pid file exists after matching remove: %v", err)
+	}
+}
+
+func TestRunningPIDRejectsRecycledPID(t *testing.T) {
+	dir := t.TempDir()
+	pidPath := filepath.Join(dir, "sing-box.pid")
+	// os.Getpid() is this test binary: a live process that is NOT sing-box, which
+	// is exactly what a recycled pid looks like. RunningPID must not report it as
+	// the running runtime just because the pid is alive.
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0644); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	paths := Paths{PIDFile: pidPath, RuntimeConfig: "/var/run/sing-box/does-not-match.json"}
+	if pid := RunningPID(paths); pid != 0 {
+		t.Fatalf("expected RunningPID to reject non-sing-box pid, got %d", pid)
+	}
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("expected stale pid file to be removed, got err=%v", err)
+	}
+}
+
+func TestProcessHasConfigEmptyPathSkipsCheck(t *testing.T) {
+	if !processHasConfig(os.Getpid(), "") {
+		t.Fatal("empty config path should fall back to the liveness probe (true)")
+	}
+}
+
+func TestCmdlineHasArg(t *testing.T) {
+	cmdline := []byte("sing-box\x00run\x00-c\x00/var/run/sing-box/config.json\x00")
+	if !cmdlineHasArg(cmdline, "/var/run/sing-box/config.json") {
+		t.Fatal("expected matching arg to be found")
+	}
+	if cmdlineHasArg(cmdline, "/tmp/other.json") {
+		t.Fatal("expected non-matching arg to be absent")
 	}
 }
 
