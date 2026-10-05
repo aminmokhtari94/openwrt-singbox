@@ -68,7 +68,7 @@
   ],
   "outbounds": [
     {
-      "domain_resolver": "cloudflare_doh_direct",
+      "domain_resolver": "local_udp",
       "tag": "direct",
       "type": "direct"
     },
@@ -77,6 +77,7 @@
       "type": "block"
     },
     {
+      "domain_resolver": "local_udp",
       "server": "69.84.182.16",
       "server_port": 443,
       "tag": "vless_0b96da71_f27d0bbdc3",
@@ -166,7 +167,7 @@
     ],
     "final": "proxy",
     "auto_detect_interface": true,
-    "default_domain_resolver": "cloudflare_doh"
+    "default_domain_resolver": "local_udp"
   },
   "experimental": {
     "cache_file": {

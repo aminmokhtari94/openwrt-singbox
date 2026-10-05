@@ -452,7 +452,11 @@ func TestRenderRemoteRuleSetUsesExistingCachePath(t *testing.T) {
 	}
 }
 
-func TestRenderDomainResolverForDirectOutbound(t *testing.T) {
+// Outbound server hostnames (and route.default_domain_resolver) must bootstrap
+// through a proxy-free resolver, never the proxy-detoured one — otherwise
+// resolving the proxy nodes' own servers loops through the proxy. The group's
+// dns_final still points at the proxy resolver for actual client queries.
+func TestRenderDomainResolverBootstrapsDirectly(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"
 	cfg.Groups["home"] = managerconfig.Group{
@@ -471,16 +475,88 @@ func TestRenderDomainResolverForDirectOutbound(t *testing.T) {
 	}
 	var document struct {
 		Route routeConfig `json:"route"`
+		DNS   dnsConfig   `json:"dns"`
 	}
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatalf("unmarshal rendered config: %v", err)
 	}
-	if document.Route.DefaultDomainResolver != "remote_doh" {
-		t.Fatalf("default domain resolver = %q, want remote_doh", document.Route.DefaultDomainResolver)
+	if document.Route.DefaultDomainResolver != "local_udp" {
+		t.Fatalf("default domain resolver = %q, want local_udp (proxy-free bootstrap)", document.Route.DefaultDomainResolver)
+	}
+	if document.DNS.Final != "remote_doh" {
+		t.Fatalf("dns final = %q, want remote_doh (client queries keep the proxy resolver)", document.DNS.Final)
 	}
 	direct := renderedOutbound(t, data, "direct")
 	if direct["domain_resolver"] != "local_udp" {
 		t.Fatalf("direct domain resolver = %#v, want local_udp", direct["domain_resolver"])
+	}
+}
+
+// A proxy node whose server is a hostname must resolve that hostname through a
+// proxy-free resolver, or the connection to the node could never bootstrap.
+func TestRenderProxyNodeResolvesServerWithoutLoop(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.Manager.ActiveGroup = "home"
+	cfg.Groups["home"] = managerconfig.Group{
+		ID: "home", Enabled: true, Name: "Home", Strategy: "manual", SelectedNode: "n1", RouteFinal: "proxy", DNSFinal: "remote_doh",
+	}
+	cfg.Nodes["n1"] = managerconfig.Node{
+		ID: "n1", Enabled: true, Type: "trojan", Tag: "n1", Server: "relay.example.com", Port: 443, Password: "x", TLS: true,
+	}
+	cfg.DNSServers["local_udp"] = managerconfig.DNSServer{
+		ID: "local_udp", Enabled: true, Type: "udp", Address: "223.5.5.5", Detour: "direct",
+	}
+	cfg.DNSServers["remote_doh"] = managerconfig.DNSServer{
+		ID: "remote_doh", Enabled: true, Type: "doh", Address: "https://1.1.1.1/dns-query", Detour: "proxy",
+	}
+
+	data, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	node := renderedOutbound(t, data, "n1")
+	if node["domain_resolver"] != "local_udp" {
+		t.Fatalf("node domain_resolver = %#v, want local_udp (must not loop through the proxy)", node["domain_resolver"])
+	}
+}
+
+// When the config defines no proxy-free resolver, the renderer injects a local
+// one so outbound hostnames can still bootstrap instead of looping.
+func TestRenderInjectsLocalBootstrapWhenNoDirectResolver(t *testing.T) {
+	cfg := managerconfig.DefaultConfig()
+	cfg.Manager.ActiveGroup = "home"
+	cfg.Groups["home"] = managerconfig.Group{
+		ID: "home", Enabled: true, Name: "Home", Strategy: "manual", RouteFinal: "proxy", DNSFinal: "remote_doh",
+	}
+	cfg.DNSServers["remote_doh"] = managerconfig.DNSServer{
+		ID: "remote_doh", Enabled: true, Type: "doh", Address: "https://1.1.1.1/dns-query", Detour: "proxy",
+	}
+
+	data, err := Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var document struct {
+		Route routeConfig `json:"route"`
+		DNS   dnsConfig   `json:"dns"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatalf("unmarshal rendered config: %v", err)
+	}
+	if document.Route.DefaultDomainResolver != "domain-bootstrap" {
+		t.Fatalf("default domain resolver = %q, want domain-bootstrap", document.Route.DefaultDomainResolver)
+	}
+	var bootstrap map[string]any
+	for _, server := range document.DNS.Servers {
+		if server["tag"] == "domain-bootstrap" {
+			bootstrap = server
+		}
+	}
+	if bootstrap == nil {
+		t.Fatalf("expected synthetic local bootstrap server:\n%s", data)
+	}
+	if bootstrap["type"] != "local" {
+		t.Fatalf("bootstrap server type = %#v, want local", bootstrap["type"])
 	}
 }
 

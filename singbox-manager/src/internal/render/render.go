@@ -64,7 +64,7 @@ func Render(cfg managerconfig.Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resolvers := domainResolversForActiveGroup(cfg, proxyTag)
+	resolvers := resolversForActiveGroup(cfg)
 	applyOutboundDomainResolvers(outbounds, resolvers)
 
 	document := singBoxConfig{
@@ -599,6 +599,16 @@ func renderDNS(cfg managerconfig.Config) *dnsConfig {
 		dns.Servers = append(dns.Servers, renderDNSServer(server))
 	}
 
+	// Guarantee a proxy-free resolver for bootstrapping outbound server
+	// hostnames. Without one, resolving a proxy node's own server would route
+	// through that very node — a loop sing-box cannot break.
+	if !hasDirectResolver(servers) {
+		dns.Servers = append(dns.Servers, map[string]any{
+			"type": "local",
+			"tag":  syntheticBootstrapTag,
+		})
+	}
+
 	if group := cfg.ActiveGroup(); group != nil {
 		for _, rule := range cfg.DNSRulesForGroup(group.ID) {
 			if server, ok := cfg.DNSServers[rule.Server]; !ok || !server.Enabled {
@@ -642,6 +652,18 @@ func enabledDNSServers(cfg managerconfig.Config) []managerconfig.DNSServer {
 	return servers
 }
 
+// hasDirectResolver reports whether any enabled server resolves without routing
+// through the proxy (detour empty or "direct"), making it safe for bootstrapping
+// outbound server hostnames.
+func hasDirectResolver(servers []managerconfig.DNSServer) bool {
+	for _, server := range servers {
+		if server.Detour == "" || server.Detour == "direct" {
+			return true
+		}
+	}
+	return false
+}
+
 // defaultResolver picks the group's preferred resolver, falling back to the
 // first enabled server.
 func defaultResolver(cfg managerconfig.Config, servers []managerconfig.DNSServer) string {
@@ -657,32 +679,44 @@ func defaultResolver(cfg managerconfig.Config, servers []managerconfig.DNSServer
 }
 
 type domainResolvers struct {
-	defaultResolver string
-	byOutbound      map[string]string
+	// bootstrap is the DNS server used to resolve outbound server hostnames and
+	// to back route.default_domain_resolver. It must never route through the
+	// proxy: resolving a proxy node's own server through that same node is an
+	// unbreakable loop (see bootstrapResolverTag / hasDirectResolver).
+	bootstrap string
 }
 
-// domainResolversForActiveGroup maps each outbound to the DNS server that
-// resolves domains for connections leaving via that outbound. A server's
-// detour ("direct"/"proxy") determines which outbound it serves.
-func domainResolversForActiveGroup(cfg managerconfig.Config, proxyTag string) domainResolvers {
-	servers := enabledDNSServers(cfg)
-	resolvers := domainResolvers{
-		defaultResolver: defaultResolver(cfg, servers),
-		byOutbound:      map[string]string{},
-	}
+func resolversForActiveGroup(cfg managerconfig.Config) domainResolvers {
+	return domainResolvers{bootstrap: bootstrapResolverTag(enabledDNSServers(cfg))}
+}
+
+// syntheticBootstrapTag is the tag of the local resolver renderDNS injects when
+// the config defines no proxy-free server to bootstrap outbound hostnames.
+const syntheticBootstrapTag = "domain-bootstrap"
+
+// bootstrapResolverTag returns the tag of a proxy-free resolver suitable for
+// bootstrapping outbound server hostnames. It prefers a plain (udp/tcp) direct
+// server for speed and reliability, falls back to any direct server, and finally
+// to syntheticBootstrapTag — matching the local server renderDNS appends when no
+// direct resolver exists.
+func bootstrapResolverTag(servers []managerconfig.DNSServer) string {
+	var fallback string
 	for _, server := range servers {
-		outbound := server.Detour
-		if outbound == "" {
+		if server.Detour != "" && server.Detour != "direct" {
 			continue
 		}
-		if outbound == "proxy" {
-			outbound = proxyTag
+		switch normalizeDNSType(server.Type) {
+		case "udp", "tcp":
+			return server.ID
 		}
-		if _, exists := resolvers.byOutbound[outbound]; !exists {
-			resolvers.byOutbound[outbound] = server.ID
+		if fallback == "" {
+			fallback = server.ID
 		}
 	}
-	return resolvers
+	if fallback != "" {
+		return fallback
+	}
+	return syntheticBootstrapTag
 }
 
 // enabledRuleSetIDs filters a list of rule-set references to those that exist
@@ -697,14 +731,18 @@ func enabledRuleSetIDs(cfg managerconfig.Config, ids []string) []string {
 	return filtered
 }
 
+// applyOutboundDomainResolvers gives every outbound that dials a server by
+// hostname an explicit proxy-free domain_resolver, so its server address is
+// resolved without looping through the proxy.
 func applyOutboundDomainResolvers(outbounds []map[string]any, resolvers domainResolvers) {
+	if resolvers.bootstrap == "" {
+		return
+	}
 	for _, outbound := range outbounds {
-		tag := stringValue(outbound["tag"])
-		resolver := resolvers.byOutbound[tag]
-		if resolver == "" || !supportsDomainResolver(outbound) {
+		if !supportsDomainResolver(outbound) {
 			continue
 		}
-		outbound["domain_resolver"] = resolver
+		outbound["domain_resolver"] = resolvers.bootstrap
 	}
 }
 
@@ -821,7 +859,7 @@ func renderRoute(cfg managerconfig.Config, proxyTag string, resolvers domainReso
 	route := routeConfig{
 		Final:                 routeFinal(cfg, proxyTag),
 		AutoDetectInterface:   true,
-		DefaultDomainResolver: resolvers.defaultResolver,
+		DefaultDomainResolver: resolvers.bootstrap,
 	}
 
 	if dnsHijackEnabled(cfg) {
