@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -358,29 +359,32 @@ func TestTeardownRemovesKillSwitchFirewall(t *testing.T) {
 }
 
 func TestDataPathActive(t *testing.T) {
-	oldRouteCommand, oldPolicyRules := routeCommand, policyRules
-	t.Cleanup(func() { routeCommand, policyRules = oldRouteCommand, oldPolicyRules })
+	oldListChain, oldPolicyRules := listChain, policyRules
+	t.Cleanup(func() { listChain, policyRules = oldListChain, oldPolicyRules })
 
-	chains := map[string]bool{}
+	chains := map[string]string{}
 	rules := map[string]string{}
-	routeCommand = func(args ...string) error {
-		if chains[args[len(args)-1]] {
-			return nil
-		}
-		return errors.New("exit status 1: Error: No such file or directory")
-	}
+	listChain = func(chain string) string { return chains[chain] }
 	policyRules = func(family string) string { return rules[family] }
 
 	if DataPathActive() {
 		t.Fatal("nothing installed, want inactive")
 	}
-	for _, chain := range []string{"singbox_manager_tproxy", "singbox_manager_dns_redirect"} {
-		chains = map[string]bool{chain: true}
-		if !DataPathActive() {
-			t.Fatalf("chain %s installed, want active", chain)
-		}
+	// fw4 reload flushes rules but leaves empty chains behind: not active.
+	empty := "table inet fw4 {\n\tchain %s {\n\t\ttype filter hook prerouting priority mangle; policy accept;\n\t}\n}\n"
+	chains["singbox_manager_tproxy"] = fmt.Sprintf(empty, "singbox_manager_tproxy")
+	chains["singbox_manager_dns_redirect"] = fmt.Sprintf(empty, "singbox_manager_dns_redirect")
+	if DataPathActive() {
+		t.Fatal("only empty chains left, want inactive")
 	}
-	chains = map[string]bool{}
+	for _, chain := range []string{"singbox_manager_tproxy", "singbox_manager_dns_redirect"} {
+		saved := chains[chain]
+		chains[chain] = strings.Replace(saved, "\t}\n}", "\t\tmeta l4proto { tcp, udp } th dport 53 redirect to :1053\n\t}\n}", 1)
+		if !DataPathActive() {
+			t.Fatalf("chain %s has rules, want active", chain)
+		}
+		chains[chain] = saved
+	}
 	rules["-6"] = "0:\tfrom all lookup local\n32765:\tfrom all fwmark 0x1 lookup 100\n"
 	if !DataPathActive() {
 		t.Fatal("fwmark policy rule left behind, want active")

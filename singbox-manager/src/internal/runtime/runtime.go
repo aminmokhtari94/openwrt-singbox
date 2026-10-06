@@ -326,7 +326,25 @@ func cleanupFirewallFull(_ managerconfig.Config, paths Paths, result *Result) er
 		return err
 	}
 	result.NftablesPath = paths.NftablesInclude
-	return reloadFirewallAfterCleanup()
+	if err := reloadFirewallAfterCleanup(); err != nil {
+		return err
+	}
+	deleteManagerObjects()
+	return nil
+}
+
+// deleteManagerObjects removes the manager's chains and sets from the fw4
+// table. `fw4 reload` flushes their rules once the include is gone but leaves
+// the empty objects behind. Best effort: they are inert, and a missing or
+// still-referenced object only means there is nothing safe to delete.
+func deleteManagerObjects() {
+	table := strings.Fields(firewall.FW4Table)
+	for _, chain := range firewall.ManagedChains {
+		_ = routeCommand(append(append([]string{"nft", "delete", "chain"}, table...), chain)...)
+	}
+	for _, set := range firewall.ManagedSets {
+		_ = routeCommand(append(append([]string{"nft", "delete", "set"}, table...), set)...)
+	}
 }
 
 func applyKillSwitchFirewall(cfg managerconfig.Config, paths Paths, result *Result) error {
@@ -479,15 +497,16 @@ func applyTProxyRoutes() error {
 }
 
 // DataPathActive reports whether transparent-proxy plumbing is installed in the
-// kernel: the tproxy or DNS-redirect nft chains, or the fwmark policy rule.
+// kernel: rules in the tproxy or DNS-redirect nft chains, or the fwmark policy
+// rule. `fw4 reload` flushes rules but leaves stray chains behind, so an empty
+// chain does not count.
 // While sing-box is not running, any of these blackholes in-scope LAN traffic
 // (it is steered to a port nothing listens on), so callers surface it as stale.
 // The kill-switch fragment has neither chain and no policy rule, so an armed
 // kill switch is not reported.
 func DataPathActive() bool {
 	for _, chain := range []string{"singbox_manager_tproxy", "singbox_manager_dns_redirect"} {
-		args := append([]string{"nft", "list", "chain"}, strings.Fields(firewall.FW4Table)...)
-		if routeCommand(append(args, chain)...) == nil {
+		if chainHasRules(listChain(chain)) {
 			return true
 		}
 	}
@@ -495,6 +514,28 @@ func DataPathActive() bool {
 		if strings.Contains(policyRules(family), "fwmark 0x1 lookup 100") {
 			return true
 		}
+	}
+	return false
+}
+
+// listChain returns `nft list chain` output for a manager chain in the fw4
+// table, or "" when it does not exist.
+var listChain = func(chain string) string {
+	args := append([]string{"list", "chain"}, strings.Fields(firewall.FW4Table)...)
+	out, _ := exec.Command("nft", append(args, chain)...).Output()
+	return string(out)
+}
+
+// chainHasRules reports whether `nft list chain` output holds any rule, i.e.
+// a line other than the table/chain braces and the base-chain type line.
+func chainHasRules(listing string) bool {
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "}" || strings.HasPrefix(line, "table ") ||
+			strings.HasPrefix(line, "chain ") || strings.HasPrefix(line, "type ") {
+			continue
+		}
+		return true
 	}
 	return false
 }

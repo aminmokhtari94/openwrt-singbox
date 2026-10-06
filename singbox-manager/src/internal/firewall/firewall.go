@@ -54,6 +54,13 @@ var ManagedSets = []string{
 	setBypassDst4, setBypassDst6,
 }
 
+// ManagedChains are the chains the manager adds to FW4Table, ordered so a chain
+// is listed before any chain it jumps to (a referenced chain cannot be deleted).
+var ManagedChains = []string{
+	"singbox_manager_tproxy", "singbox_manager_dns_redirect",
+	"singbox_manager_kill_switch_forward", tproxyDo,
+}
+
 // buckets holds the per-mode device address sets. A device resolves to exactly
 // one effective mode, so its source addresses land in exactly one of the
 // tproxy/bypass buckets. The udpbypass bucket overlaps the tproxy bucket: a
