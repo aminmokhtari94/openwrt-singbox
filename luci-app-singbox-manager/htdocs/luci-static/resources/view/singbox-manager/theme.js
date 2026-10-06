@@ -103,6 +103,8 @@ var CSS = [
 	'.singbox-manager-chip{font-size:11px;padding:2px 8px!important;border-radius:12px}',
 
 	/* ---- alerts + preformatted blocks ---- */
+	'.singbox-manager-alert{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;margin-bottom:12px;padding:12px 14px;border-radius:8px;border-left:4px solid #b91c1c;background:rgba(185,28,28,.10);font-size:13px}',
+	'.singbox-manager-alert strong{display:block;margin-bottom:2px;color:#b91c1c}',
 	'.singbox-manager-warning{padding:10px 12px;border-radius:8px;border-left:4px solid #b45309;background:rgba(180,83,9,.10);font-size:13px}',
 	'.singbox-manager-preview{box-sizing:border-box;max-width:100%;min-height:60px;overflow:auto;padding:12px;border:1px solid var(--border-color-medium);border-radius:8px;background:var(--background-color-low);font:12px/1.5 monospace;white-space:pre}',
 	'.singbox-manager-log{box-sizing:border-box;max-width:100%;min-height:360px;max-height:60vh;overflow:auto;padding:12px;border:1px solid var(--border-color-medium);border-radius:8px;background:var(--background-color-low);font:12px/1.5 monospace;white-space:pre-wrap;word-break:break-word}',

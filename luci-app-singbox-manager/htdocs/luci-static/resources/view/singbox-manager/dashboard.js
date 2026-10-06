@@ -43,6 +43,12 @@ var callStop = rpc.declare({
 	expect: { '': {} }
 });
 
+var callCleanup = rpc.declare({
+	object: 'singbox.manager',
+	method: 'cleanup',
+	expect: { '': {} }
+});
+
 var callRestart = rpc.declare({
 	object: 'singbox.manager',
 	method: 'restart',
@@ -296,10 +302,31 @@ function renderToolbar(view, data) {
 	]);
 }
 
+// renderStaleAlert warns when sing-box is down but its firewall rules and policy
+// routing are still installed: proxied devices are then steered to a port
+// nothing listens on and lose internet until the rules are removed.
+function renderStaleAlert(view, data) {
+	if (!data.stale_datapath)
+		return '';
+	return E('div', { 'class': 'singbox-manager-alert' }, [
+		E('div', {}, [
+			E('strong', {}, [ _('Proxied devices have no internet') ]),
+			E('div', {}, [ _('sing-box is not running, but its transparent-proxy firewall rules and routing are still active. Start sing-box, or remove the rules to restore direct internet.') ])
+		]),
+		E('button', {
+			'class': 'btn cbi-button cbi-button-negative',
+			'click': ui.createHandlerFn(view, function() {
+				return runAction(view, callCleanup, _('Proxy rules removed'), _('Removing proxy rules failed'));
+			})
+		}, [ _('Remove proxy rules') ])
+	]);
+}
+
 function renderLive(view, data) {
 	data = data || {};
 	var hist = pushHistory(view, data);
 	return E('div', { 'class': 'singbox-manager-live' }, [
+		renderStaleAlert(view, data),
 		renderHero(view, data),
 		renderThroughput(data, hist),
 		E('div', { 'class': 'singbox-manager-metrics' }, [

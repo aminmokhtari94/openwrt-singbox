@@ -77,6 +77,9 @@ type Status struct {
 	KillSwitch         bool   `json:"kill_switch"`
 	NftablesInclude    string `json:"nftables_include"`
 	TUNEnabled         bool   `json:"tun_enabled"`
+	// StaleDataPath is set when sing-box is not running but its firewall/policy
+	// routing is still installed, which leaves in-scope devices without internet.
+	StaleDataPath bool `json:"stale_datapath"`
 }
 
 type RPCRequest struct {
@@ -346,6 +349,15 @@ func startSignalCleanup(configPath string) {
 	}()
 }
 
+// cleanupResult tears down sing-box and every piece of transparent-proxy
+// plumbing (nft include, policy routing) without touching the saved config.
+func cleanupResult(configPath string) map[string]any {
+	if err := cleanupRuntime(configPath); err != nil {
+		return validationResult(false, runtime.Result{}, err)
+	}
+	return map[string]any{"ok": true, "message": "proxy rules removed"}
+}
+
 func cleanupRuntime(configPath string) error {
 	cfg, err := managerconfig.Load(configPath)
 	if err != nil {
@@ -491,6 +503,7 @@ func runRPCD(args []string) {
 			"status":                {},
 			"start":                 {},
 			"stop":                  {},
+			"cleanup":               {},
 			"restart":               {},
 			"reload":                {},
 			"validate":              {},
@@ -554,6 +567,9 @@ func clientTimeout(method string) time.Duration {
 		return 120 * time.Second
 	case "node_latency_test", "node_ping_test", "latency_test", "dns_test":
 		return 30 * time.Second
+	case "stop", "cleanup":
+		// Teardown waits up to 5s for sing-box to exit, then reloads fw4.
+		return 30 * time.Second
 	default:
 		return 5 * time.Second
 	}
@@ -586,6 +602,12 @@ func callDaemon(method string, input io.Reader) {
 	if err != nil {
 		if method == "status" {
 			writeJSON(statusUnavailable(cfg, err))
+			return
+		}
+		// With the daemon down nothing else can remove a leftover data path, so
+		// tear it down from this (root) rpcd process directly.
+		if method == "cleanup" {
+			writeJSON(cleanupResult(defaultConfigPath))
 			return
 		}
 		writeJSON(RPCError{Error: err.Error()})
@@ -698,6 +720,8 @@ func handleRPC(w http.ResponseWriter, r *http.Request, configPath string) {
 		writeHTTPJSON(w, http.StatusOK, startRuntime(configPath))
 	case "stop":
 		writeHTTPJSON(w, http.StatusOK, stopRuntime(configPath))
+	case "cleanup":
+		writeHTTPJSON(w, http.StatusOK, cleanupResult(configPath))
 	case "restart":
 		writeHTTPJSON(w, http.StatusOK, restartRuntime(configPath))
 	case "reload":
@@ -1797,6 +1821,7 @@ func collectStatus(cfg ManagerConfig) Status {
 		KillSwitch:         cfg.KillSwitch,
 		NftablesInclude:    runtime.DefaultPaths.NftablesInclude,
 		TUNEnabled:         cfg.TUNEnabled,
+		StaleDataPath:      pid == 0 && runtime.DataPathActive(),
 	}
 }
 

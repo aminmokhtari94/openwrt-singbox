@@ -478,6 +478,33 @@ func applyTProxyRoutes() error {
 	return nil
 }
 
+// DataPathActive reports whether transparent-proxy plumbing is installed in the
+// kernel: the tproxy or DNS-redirect nft chains, or the fwmark policy rule.
+// While sing-box is not running, any of these blackholes in-scope LAN traffic
+// (it is steered to a port nothing listens on), so callers surface it as stale.
+// The kill-switch fragment has neither chain and no policy rule, so an armed
+// kill switch is not reported.
+func DataPathActive() bool {
+	for _, chain := range []string{"singbox_manager_tproxy", "singbox_manager_dns_redirect"} {
+		args := append([]string{"nft", "list", "chain"}, strings.Fields(firewall.FW4Table)...)
+		if routeCommand(append(args, chain)...) == nil {
+			return true
+		}
+	}
+	for _, family := range []string{"-4", "-6"} {
+		if strings.Contains(policyRules(family), "fwmark 0x1 lookup 100") {
+			return true
+		}
+	}
+	return false
+}
+
+// policyRules lists the policy routing rules for an address family ("-4"/"-6").
+var policyRules = func(family string) string {
+	out, _ := exec.Command("ip", family, "rule", "show").Output()
+	return string(out)
+}
+
 func cleanupTProxyRoutes() error {
 	for _, family := range []string{"-4", "-6"} {
 		if err := deleteTProxyPolicyRules(family); err != nil {

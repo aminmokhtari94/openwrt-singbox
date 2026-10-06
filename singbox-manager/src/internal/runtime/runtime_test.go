@@ -356,3 +356,33 @@ func TestTeardownRemovesKillSwitchFirewall(t *testing.T) {
 		t.Fatalf("kill switch include still exists after teardown: %v", err)
 	}
 }
+
+func TestDataPathActive(t *testing.T) {
+	oldRouteCommand, oldPolicyRules := routeCommand, policyRules
+	t.Cleanup(func() { routeCommand, policyRules = oldRouteCommand, oldPolicyRules })
+
+	chains := map[string]bool{}
+	rules := map[string]string{}
+	routeCommand = func(args ...string) error {
+		if chains[args[len(args)-1]] {
+			return nil
+		}
+		return errors.New("exit status 1: Error: No such file or directory")
+	}
+	policyRules = func(family string) string { return rules[family] }
+
+	if DataPathActive() {
+		t.Fatal("nothing installed, want inactive")
+	}
+	for _, chain := range []string{"singbox_manager_tproxy", "singbox_manager_dns_redirect"} {
+		chains = map[string]bool{chain: true}
+		if !DataPathActive() {
+			t.Fatalf("chain %s installed, want active", chain)
+		}
+	}
+	chains = map[string]bool{}
+	rules["-6"] = "0:\tfrom all lookup local\n32765:\tfrom all fwmark 0x1 lookup 100\n"
+	if !DataPathActive() {
+		t.Fatal("fwmark policy rule left behind, want active")
+	}
+}
