@@ -231,9 +231,26 @@ function showServerModal(view, row) {
 	]);
 }
 
-function showDeleteServerModal(view, row) {
-	ui.showModal(_('Delete DNS Server'), [
-		E('p', {}, _('Delete this DNS server? Rules that reference it are removed too.')),
+function showDeleteServerModal(view, row, data) {
+	var rules = ((data && data.rules) || []).filter(function(rule) {
+		return rule.server === row.id;
+	});
+	var body = [
+		E('p', {}, [ _('Delete DNS server "%s"?').format(row.name || row.id) ])
+	];
+	if (rules.length) {
+		body.push(E('p', {}, [ _('These DNS rules use it and will be deleted too:') ]));
+		body.push(E('ul', {}, rules.map(function(rule) {
+			var detail = (rule.sources || []).concat(rule.rulesets || []).join(', ');
+			return E('li', {}, [ (rule.name || rule.id) + (detail ? ' (' + detail + ')' : '') ]);
+		})));
+	} else {
+		body.push(E('p', {}, [ _('No DNS rules use it.') ]));
+	}
+	if (data && data.dns_final === row.id)
+		body.push(E('p', { 'class': 'singbox-manager-warning' }, [ _('It is the default resolver; the default will be cleared.') ]));
+
+	ui.showModal(_('Delete DNS Server'), body.concat([
 		E('div', { 'class': 'right' }, [
 			E('button', { 'class': 'btn cbi-button', 'click': ui.hideModal }, _('Cancel')),
 			' ',
@@ -250,7 +267,7 @@ function showDeleteServerModal(view, row) {
 				})
 			}, _('Delete'))
 		])
-	]);
+	]));
 }
 
 function showRuleModal(view, data, row) {
@@ -369,7 +386,7 @@ function renderResolution(view, data) {
 	]);
 }
 
-function renderServers(view, servers) {
+function renderServers(view, servers, data) {
 	return E('table', { 'class': 'singbox-manager-table' }, [
 		E('thead', {}, E('tr', {}, [
 			E('th', {}, _('Server')),
@@ -405,7 +422,7 @@ function renderServers(view, servers) {
 					}, _('Edit')),
 					E('button', {
 						'class': 'btn cbi-button cbi-button-remove',
-						'click': ui.createHandlerFn(view, function() { showDeleteServerModal(view, server); })
+						'click': ui.createHandlerFn(view, function() { showDeleteServerModal(view, server, data); })
 					}, _('Delete'))
 				]))
 			]);
@@ -493,7 +510,7 @@ return view.extend({
 						'click': ui.createHandlerFn(view, function() { showServerModal(view); })
 					}, _('Add'))
 				]),
-				renderServers(view, servers)
+				renderServers(view, servers, data)
 			]),
 			E('div', { 'class': 'singbox-manager-section' }, [
 				E('div', { 'class': 'singbox-manager-section-header' }, [
