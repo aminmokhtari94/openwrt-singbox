@@ -64,6 +64,12 @@
       "sniff": true,
       "tag": "tproxy-in",
       "type": "tproxy"
+    },
+    {
+      "listen": "::",
+      "listen_port": 1053,
+      "tag": "dns-in",
+      "type": "direct"
     }
   ],
   "outbounds": [
@@ -109,6 +115,12 @@
   ],
   "route": {
     "rules": [
+      {
+        "action": "hijack-dns",
+        "inbound": [
+          "dns-in"
+        ]
+      },
       {
         "action": "hijack-dns",
         "protocol": "dns"

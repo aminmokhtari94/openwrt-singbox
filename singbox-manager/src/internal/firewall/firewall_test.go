@@ -44,9 +44,9 @@ func requireNone(t *testing.T, got string, unwanted ...string) {
 	}
 }
 
-// Default tproxy: a single catch-all mangle chain, and (crucially) no nat
-// `redirect` statement anywhere — DNS is left to sing-box's hijack-dns route
-// rule.
+// Default tproxy: a single catch-all mangle chain with no nat statement in it —
+// a redirect cannot load in a mangle chain. The only redirect lives in the
+// separate nat-type DNS redirect chain.
 func TestRenderDefaultTProxy(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Transparent.DefaultMode = "tproxy"
@@ -62,9 +62,61 @@ func TestRenderDefaultTProxy(t *testing.T) {
 	)
 	requireNone(t, got,
 		"chain singbox_manager_redirect {",
-		"redirect", // the whole redirect path is gone
 		"dnat",
 	)
+	tproxyChain := got[strings.Index(got, "chain singbox_manager_tproxy {"):]
+	tproxyChain = tproxyChain[:strings.Index(tproxyChain, "}\n")]
+	requireNone(t, tproxyChain, "redirect")
+}
+
+// Router-bound DNS cannot be tproxied: the kernel's tproxy socket lookup finds
+// dnsmasq's socket on the local address first and delivers the query to it. So
+// with hijack enabled the tproxy chain returns local port-53 traffic, and a
+// nat-type chain redirects it to sing-box's dns-in inbound on dns_port.
+func TestRenderDNSRedirectForRouterBoundDNS(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "tproxy"
+	cfg.Transparent.DNSHijack = true
+	cfg.Manager.DNSPort = 1053
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"\tfib daddr type local meta l4proto { tcp, udp } th dport 53 return\n",
+		"chain singbox_manager_dns_redirect {",
+		"type nat hook prerouting priority dstnat; policy accept;",
+		"\tfib daddr type != local return\n",
+		"\tether saddr @singbox_manager_bypass_mac return\n",
+		"\tmeta l4proto { tcp, udp } th dport 53 redirect to :1053\n",
+	)
+	// The local return must come before the off-router DNS capture.
+	if strings.Index(got, "fib daddr type local meta l4proto") > strings.Index(got, "th dport 53 goto") {
+		t.Fatalf("router-bound DNS must be returned before the tproxy DNS capture:\n%s", got)
+	}
+	// A LAN-wide destination bypass must not exempt the router's resolver.
+	redirectChain := got[strings.Index(got, "chain singbox_manager_dns_redirect {"):]
+	requireNone(t, redirectChain, "@singbox_manager_bdst4", "@singbox_manager_bdst6")
+}
+
+// Whitelist mode scopes the DNS redirect to the tproxy set; without hijack
+// there is no redirect chain at all.
+func TestRenderDNSRedirectScopes(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Transparent.DefaultMode = "off"
+	cfg.Transparent.DNSHijack = true
+	cfg.Manager.DNSPort = 1053
+	cfg.Transparent.Devices = []managerconfig.Device{
+		{ID: "phone", Enabled: true, Mode: "tproxy", IPv4: "192.168.1.50"},
+	}
+
+	got := mustRender(t, cfg)
+	requireAll(t, got,
+		"\tip saddr @singbox_manager_tproxy4 meta l4proto { tcp, udp } th dport 53 redirect to :1053\n",
+		"\tether saddr @singbox_manager_tproxy_mac meta l4proto { tcp, udp } th dport 53 redirect to :1053\n",
+	)
+	requireNone(t, got, "\tmeta l4proto { tcp, udp } th dport 53 redirect to :1053\n")
+
+	cfg.Transparent.DNSHijack = false
+	requireNone(t, mustRender(t, cfg), "chain singbox_manager_dns_redirect {", "redirect")
 }
 
 // DNS capture: with hijack enabled, in-scope port-53 traffic must be tproxied

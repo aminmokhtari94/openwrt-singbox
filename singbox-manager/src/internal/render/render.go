@@ -109,6 +109,17 @@ func renderInbounds(cfg managerconfig.Config) []map[string]any {
 		})
 	}
 
+	// DNS aimed at the router is nat-redirected here (tproxy can't capture it
+	// while dnsmasq owns the local socket); the hijack-dns route rule answers it.
+	if dnsHijackEnabled(cfg) {
+		inbounds = append(inbounds, map[string]any{
+			"type":        "direct",
+			"tag":         dnsInboundTag,
+			"listen":      "::",
+			"listen_port": cfg.Manager.DNSPort,
+		})
+	}
+
 	if cfg.TUN.Enabled {
 		addresses := []string{}
 		if cfg.TUN.Inet4Address != "" {
@@ -863,10 +874,10 @@ func renderRoute(cfg managerconfig.Config, proxyTag string, resolvers domainReso
 	}
 
 	if dnsHijackEnabled(cfg) {
-		route.Rules = append(route.Rules, map[string]any{
-			"protocol": "dns",
-			"action":   "hijack-dns",
-		})
+		route.Rules = append(route.Rules,
+			map[string]any{"inbound": []string{dnsInboundTag}, "action": "hijack-dns"},
+			map[string]any{"protocol": "dns", "action": "hijack-dns"},
+		)
 	}
 
 	group := cfg.ActiveGroup()
@@ -954,6 +965,9 @@ func normalizeSourceCIDRs(sources []string) []string {
 	}
 	return cidrs
 }
+
+// dnsInboundTag is the direct inbound the firewall redirects router-bound DNS to.
+const dnsInboundTag = "dns-in"
 
 func dnsHijackEnabled(cfg managerconfig.Config) bool {
 	return cfg.Transparent.Active() && cfg.Transparent.DNSHijack

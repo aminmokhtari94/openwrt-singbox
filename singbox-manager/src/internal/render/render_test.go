@@ -560,10 +560,11 @@ func TestRenderInjectsLocalBootstrapWhenNoDirectResolver(t *testing.T) {
 	}
 }
 
-// DNS hijack renders the hijack-dns route rule but no dedicated DNS inbound:
-// the firewall tproxies port 53 into the tproxy inbound, and hijack-dns answers
-// it there, so a separate dns-in inbound is redundant.
-func TestRenderDNSHijackRouteNoDedicatedInbound(t *testing.T) {
+// DNS hijack renders a dns-in direct inbound on dns_port (the firewall
+// nat-redirects router-bound DNS there, since tproxy can't steal it from
+// dnsmasq's local socket) plus hijack-dns route rules for that inbound and for
+// DNS sniffed on the tproxy inbound.
+func TestRenderDNSHijackInboundAndRoute(t *testing.T) {
 	cfg := managerconfig.DefaultConfig()
 	cfg.Manager.ActiveGroup = "home"
 	cfg.Transparent.DefaultMode = "tproxy"
@@ -580,11 +581,37 @@ func TestRenderDNSHijackRouteNoDedicatedInbound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if strings.Contains(string(data), `"tag": "dns-in"`) {
-		t.Fatalf("rendered config still emits the removed dns-in inbound:\n%s", data)
+	var document struct {
+		Inbounds []map[string]any `json:"inbounds"`
+		Route    struct {
+			Rules []map[string]any `json:"rules"`
+		} `json:"route"`
 	}
-	if !strings.Contains(string(data), `"action": "hijack-dns"`) {
-		t.Fatalf("rendered config missing DNS hijack route:\n%s", data)
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var dnsIn map[string]any
+	for _, inbound := range document.Inbounds {
+		if inbound["tag"] == "dns-in" {
+			dnsIn = inbound
+		}
+	}
+	if dnsIn == nil || dnsIn["type"] != "direct" || dnsIn["listen_port"] != float64(cfg.Manager.DNSPort) {
+		t.Fatalf("missing dns-in direct inbound on dns_port %d:\n%s", cfg.Manager.DNSPort, data)
+	}
+	if len(document.Route.Rules) < 2 ||
+		document.Route.Rules[0]["action"] != "hijack-dns" || document.Route.Rules[0]["inbound"] == nil ||
+		document.Route.Rules[1]["action"] != "hijack-dns" || document.Route.Rules[1]["protocol"] != "dns" {
+		t.Fatalf("expected leading hijack-dns rules for dns-in and protocol dns:\n%s", data)
+	}
+
+	cfg.Transparent.DNSHijack = false
+	data, err = Render(cfg)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(string(data), `"dns-in"`) || strings.Contains(string(data), "hijack-dns") {
+		t.Fatalf("hijack disabled but DNS capture still rendered:\n%s", data)
 	}
 }
 

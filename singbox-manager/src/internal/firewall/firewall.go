@@ -122,6 +122,10 @@ func Render(cfg managerconfig.Config) ([]byte, error) {
 	if cfg.UsesTProxy() {
 		builder.WriteString("\n")
 		writeTProxyChain(&builder, cfg, cfg.Transparent.DefaultMode == "tproxy")
+		if cfg.Transparent.DNSHijack {
+			builder.WriteString("\n")
+			writeDNSRedirectChain(&builder, cfg, cfg.Transparent.DefaultMode == "tproxy")
+		}
 	}
 	if cfg.Transparent.KillSwitch {
 		builder.WriteString("\n")
@@ -188,20 +192,19 @@ func writeSetElements(builder *strings.Builder, values []string) {
 	builder.WriteString(" }\n")
 }
 
-// writeTProxyChain renders the mangle-table TCP+UDP tproxy path. DNS is handled
-// by sing-box's hijack-dns route rule, so this chain emits no nat statement and
-// therefore loads cleanly in a filter/mangle chain.
+// writeTProxyChain renders the mangle-table TCP+UDP tproxy path. It emits no nat
+// statement, so it loads cleanly in a filter/mangle chain; DNS aimed at the
+// router is redirected by writeDNSRedirectChain instead.
 //
 // Ordering matters. In catch-all mode the full-device bypass carve-outs run
 // first so a fully-bypassed device is direct for everything, DNS included. Then,
-// crucially, DNS is captured *before* the UDP-bypass and local/reserved returns:
-// a UDP-bypass device (proxied TCP, direct UDP) must still have its DNS — which
-// is UDP/53 — hijacked, or its resolution leaks direct and sing-box can't route
-// it. LAN clients also normally resolve through the router itself — a local,
-// private address — so without an early port-53 tproxy their DNS would be
-// returned by the local/reserved rules and never reach sing-box. Only after DNS
-// is captured do the remaining per-device UDP opt-outs and router-local/private
-// destinations bypass as before.
+// crucially, off-router DNS is captured *before* the UDP-bypass and
+// private/reserved returns: a UDP-bypass device (proxied TCP, direct UDP) must
+// still have its DNS — which is UDP/53 — hijacked, or its resolution leaks
+// direct and sing-box can't route it; a resolver on a private address would
+// otherwise be returned too. Only after DNS is captured do the remaining
+// per-device UDP opt-outs and router-local/private destinations bypass as
+// before.
 func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchAll bool) {
 	builder.WriteString("chain singbox_manager_tproxy {\n")
 	builder.WriteString("\ttype filter hook prerouting priority mangle; policy accept;\n")
@@ -216,10 +219,14 @@ func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchA
 	fmt.Fprintf(builder, "\tip daddr @%s return\n", setBypassDst4)
 	fmt.Fprintf(builder, "\tip6 daddr @%s return\n", setBypassDst6)
 
-	// Capture in-scope DNS before the UDP-bypass and local/reserved returns so
-	// queries aimed at the router (the default LAN resolver) are tproxied and
-	// hijacked too — even for devices whose other UDP egresses directly.
+	// Capture in-scope DNS before the UDP-bypass and private/reserved returns so
+	// queries aimed at an off-router resolver are hijacked too — even for devices
+	// whose other UDP egresses directly. DNS aimed at the router itself is left
+	// to the nat redirect chain: tproxy cannot steal it, because the kernel's
+	// tproxy socket lookup matches dnsmasq's socket on that local address first
+	// and delivers the query to dnsmasq instead.
 	if cfg.Transparent.DNSHijack {
+		builder.WriteString("\tfib daddr type local meta l4proto { tcp, udp } th dport 53 return\n")
 		if catchAll {
 			fmt.Fprintf(builder, "\tmeta l4proto { tcp, udp } th dport 53 goto %s\n", tproxyDo)
 		} else {
@@ -246,6 +253,29 @@ func writeTProxyChain(builder *strings.Builder, cfg managerconfig.Config, catchA
 
 	fmt.Fprintf(builder, "chain %s {\n", tproxyDo)
 	fmt.Fprintf(builder, "\tmeta l4proto { tcp, udp } meta mark set %s tproxy to :%d accept\n", tproxyMark, cfg.Manager.TProxyPort)
+	builder.WriteString("}\n")
+}
+
+// writeDNSRedirectChain redirects in-scope devices' DNS aimed at the router
+// itself (the resolver DHCP hands out) to sing-box's dns-in inbound on
+// dns_port. It is a separate nat-type chain because a redirect statement cannot
+// load in the mangle tproxy chain. Destination bypass sets are deliberately not
+// consulted: the router's own resolver is not egress, and a LAN-wide
+// bypass_subnet would otherwise always cover it.
+func writeDNSRedirectChain(builder *strings.Builder, cfg managerconfig.Config, catchAll bool) {
+	builder.WriteString("chain singbox_manager_dns_redirect {\n")
+	builder.WriteString("\ttype nat hook prerouting priority dstnat; policy accept;\n")
+	fmt.Fprintf(builder, "\tiifname != %s return\n", nftStringSet(cfg.Transparent.LANIfnames))
+	builder.WriteString("\tfib daddr type != local return\n")
+	redirect := fmt.Sprintf("meta l4proto { tcp, udp } th dport 53 redirect to :%d", cfg.Manager.DNSPort)
+	if catchAll {
+		writeCarveOuts(builder, setBypassMAC, setBypass4, setBypass6)
+		fmt.Fprintf(builder, "\t%s\n", redirect)
+	} else {
+		fmt.Fprintf(builder, "\tether saddr @%s %s\n", setTProxyMAC, redirect)
+		fmt.Fprintf(builder, "\tip saddr @%s %s\n", setTProxy4, redirect)
+		fmt.Fprintf(builder, "\tip6 saddr @%s %s\n", setTProxy6, redirect)
+	}
 	builder.WriteString("}\n")
 }
 
